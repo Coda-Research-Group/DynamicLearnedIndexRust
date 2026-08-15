@@ -8,7 +8,7 @@ use measure_time_macro::log_time;
 use rand::distr::weighted::WeightedIndex;
 use rand::distr::Distribution;
 use rand::rng;
-use std::collections::HashMap;
+use rand::seq::SliceRandom;
 use std::path::PathBuf;
 
 use crate::errors::{DliError, DliResult};
@@ -234,8 +234,6 @@ impl<F: FloatElement> crate::model::ModelInterface<F> for Model<F> {
 impl<F: FloatElement> Model<F> {
     #[log_time]
     fn _train(&mut self, xs: &ArraySlice, ys: &[i64], opt: &mut candle_nn::AdamW) -> DliResult<()> {
-        let weighted_index = Self::weighted_index(ys)?;
-
         let dataset_tensor = Tensor::from_slice(
             xs,
             (xs.len() / self.input_shape, self.input_shape),
@@ -246,11 +244,27 @@ impl<F: FloatElement> Model<F> {
         let mut rng = rng();
         let total_samples = ys.len();
         let batch_size = self.train_params.batch_size;
-        let generate_indices = |rng: &mut _| {
-            Tensor::from_iter(
-                (0..total_samples).map(|_| weighted_index.sample(rng) as u32),
-                &self.device,
+        let weighted_index = if self.train_params.balance {
+            Some(
+                WeightedIndex::new(crate::model::class_balance_weights(ys))
+                    .map_err(|_| DliError::ModelCreation("Failed to create WeightedIndex"))?,
             )
+        } else {
+            None
+        };
+        // Balanced: class-weighted sampling with replacement (oversamples rare
+        // classes). Unbalanced (default): a uniform permutation each epoch, i.e.
+        // sampling without replacement. Matches the tch backend.
+        let generate_indices = |rng: &mut _| {
+            let idx: Vec<u32> = match &weighted_index {
+                Some(wi) => (0..total_samples).map(|_| wi.sample(rng) as u32).collect(),
+                None => {
+                    let mut idx: Vec<u32> = (0..total_samples as u32).collect();
+                    idx.shuffle(rng);
+                    idx
+                }
+            };
+            Tensor::from_iter(idx, &self.device)
         };
         let mut indices = generate_indices(&mut rng)?;
         for epoch in 0..self.train_params.epochs {
@@ -274,24 +288,6 @@ impl<F: FloatElement> Model<F> {
             }
         }
         Ok(())
-    }
-
-    fn weighted_index(ys: &[i64]) -> DliResult<WeightedIndex<f64>> {
-        let mut class_counts = HashMap::new();
-        for &y in ys {
-            *class_counts.entry(y).or_insert(0) += 1;
-        }
-
-        let weights: Vec<f64> = ys
-            .iter()
-            .map(|&y| {
-                let count = class_counts.get(&y).unwrap_or(&1);
-                1.0 / (*count as f64)
-            })
-            .collect();
-
-        WeightedIndex::new(&weights)
-            .map_err(|_| DliError::ModelCreation("Failed to create WeightedIndex"))
     }
 
     pub fn quantize(&mut self) -> DliResult<()> {

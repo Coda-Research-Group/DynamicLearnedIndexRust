@@ -39,6 +39,7 @@ fn model() -> Model<f32> {
             epochs: EPOCHS,
             max_iters: 10,
             retrain_strategy: RetrainStrategy::NoRetrain,
+            balance: false,
         })
         .label_method(LabelMethod::KMeans)
         .build()

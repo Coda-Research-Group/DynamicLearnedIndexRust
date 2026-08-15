@@ -846,6 +846,11 @@ impl<F: FloatElement> IndexBuilder<F> {
         self
     }
 
+    pub fn balance(mut self, balance: bool) -> Self {
+        self.levels_config.model.train_params.balance = balance;
+        self
+    }
+
     pub fn add_layer(mut self, layer: ModelLayer) -> Self {
         match self.model_layers.as_mut() {
             Some(layers) => layers.push(layer),

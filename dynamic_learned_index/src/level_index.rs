@@ -672,6 +672,7 @@ mod tests {
                 threshold_samples: 500,
                 max_iters: 100,
                 retrain_strategy: RetrainStrategy::NoRetrain,
+                balance: false,
             },
             weights_path: None,
             quantize: false,

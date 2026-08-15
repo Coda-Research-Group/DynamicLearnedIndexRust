@@ -78,6 +78,11 @@ class DynamicLearnedIndexBuilder:
         self.config["retrain_strategy"] = strategy
         return self
 
+    def balance(self, balance: bool) -> 'DynamicLearnedIndexBuilder':
+        """Set whether training uses class-balanced sampling."""
+        self.config["balance"] = balance
+        return self
+
     def input_shape(self, shape: int) -> 'DynamicLearnedIndexBuilder':
         """Set the input shape."""
         self.config["input_shape"] = shape

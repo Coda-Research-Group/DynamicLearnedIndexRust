@@ -75,6 +75,11 @@ where
             builder = builder.retrain_strategy(retrain_strategy);
         }
     }
+    if let Some(v) = config.get_item("balance").ok().flatten() {
+        if let Ok(balance) = v.extract::<bool>() {
+            builder = builder.balance(balance);
+        }
+    }
     if let Some(v) = config.get_item("input_shape").ok().flatten() {
         if let Ok(shape) = v.extract::<usize>() {
             builder = builder.input_shape(shape);

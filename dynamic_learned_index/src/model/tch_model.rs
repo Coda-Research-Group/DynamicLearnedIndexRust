@@ -3,9 +3,11 @@ use std::{marker::PhantomData, path::PathBuf};
 
 use log::debug;
 use measure_time_macro::log_time;
+use rand::distr::weighted::WeightedIndex;
+use rand::distr::Distribution as _;
+use rand::seq::SliceRandom;
 use tch::{
     nn::{self, OptimizerConfig},
-    vision::dataset::Dataset,
     Device, Tensor,
 };
 
@@ -188,20 +190,59 @@ impl<F: FloatElement> crate::model::ModelInterface<F> for Model<F> {
             self.train_params.max_iters,
         );
         assert_eq!(ys.len(), sample_size);
-        let dataset = self.dataset(&xs, &ys);
         let mut opt = nn::Adam::default().build(&self.vs, 1e-3).unwrap();
+
+        let total_samples = ys.len();
+        let n = total_samples as i64;
+        let batch_size = self.train_params.batch_size as i64;
+
+        let to_dev = |t: Tensor| match self.device {
+            Device::Cpu => t,
+            _ => t.to_device(self.device),
+        };
+        let xs_tensor = to_dev(Tensor::from_slice(&xs).view((n, self.input_shape as i64)));
+        let ys_tensor = to_dev(Tensor::from_slice(&ys).to_kind(tch::Kind::Int64));
+
+        // Balanced: class-weighted sampling with replacement (oversamples rare
+        // classes). Unbalanced (default): a uniform permutation each epoch, i.e.
+        // sampling without replacement. Matches the candle backend.
+        let weighted_index = if self.train_params.balance {
+            Some(
+                WeightedIndex::new(crate::model::class_balance_weights(&ys))
+                    .map_err(|_| DliError::ModelCreation("Failed to create WeightedIndex"))?,
+            )
+        } else {
+            None
+        };
+        let mut rng = rand::rng();
+
         for _ in 0..self.train_params.epochs {
-            for (xs, ys) in dataset
-                .train_iter(self.train_params.batch_size as i64)
-                .shuffle()
-            {
+            let idx: Vec<i64> = match &weighted_index {
+                Some(wi) => (0..total_samples)
+                    .map(|_| wi.sample(&mut rng) as i64)
+                    .collect(),
+                None => {
+                    let mut idx: Vec<i64> = (0..n).collect();
+                    idx.shuffle(&mut rng);
+                    idx
+                }
+            };
+            let idx_tensor = to_dev(Tensor::from_slice(&idx));
+
+            let mut start = 0i64;
+            while start < n {
+                let len = std::cmp::min(batch_size, n - start);
+                let batch_idx = idx_tensor.narrow(0, start, len);
+                let batch_xs = xs_tensor.index_select(0, &batch_idx);
+                let batch_ys = ys_tensor.index_select(0, &batch_idx);
                 let loss = self
                     .model
                     .lock()
                     .unwrap()
-                    .forward(&xs)
-                    .cross_entropy_for_logits(&ys);
+                    .forward(&batch_xs)
+                    .cross_entropy_for_logits(&batch_ys);
                 opt.backward_step(&loss);
+                start += len;
             }
         }
         Ok(())
@@ -271,42 +312,6 @@ impl<F: FloatElement> Model<F> {
         Ok(())
     }
 
-    pub fn dataset(&self, xs: &[f32], ys: &[i64]) -> Dataset {
-        let total_queries = ys.len();
-        assert!(xs.len().is_multiple_of(self.input_shape));
-        assert!(xs.len() / self.input_shape == ys.len());
-        let xs = Tensor::from_slice(xs);
-        let xs = xs.view((
-            xs.size()[0] / self.input_shape as i64,
-            self.input_shape as i64,
-        ));
-        let xs = match self.device {
-            Device::Cpu => xs,
-            _ => xs.to_device(self.device),
-        };
-        assert!(
-            xs.size()[0] as usize == total_queries,
-            "{} != {total_queries}, {:?}",
-            xs.size()[0],
-            xs.size()
-        );
-        let ys = Tensor::from_slice(ys).to_kind(tch::Kind::Int64);
-        let ys = match self.device {
-            Device::Cpu => ys,
-            _ => ys.to_device(self.device),
-        };
-        assert!(xs.size()[0] == ys.size()[0]);
-        assert!(xs.size()[0] == ys.size()[0]);
-        assert!(ys.kind() == tch::Kind::Int64);
-        let options = (xs.kind(), xs.device());
-        Dataset {
-            train_images: xs,
-            train_labels: ys,
-            test_images: Tensor::empty(0, options),
-            test_labels: Tensor::empty(0, options),
-            labels: self.labels as i64,
-        }
-    }
 }
 
 fn tensor2vec(tensor: &tch::Tensor) -> Vec<f32> {

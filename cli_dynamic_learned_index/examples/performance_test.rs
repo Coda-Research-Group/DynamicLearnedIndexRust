@@ -53,6 +53,7 @@ fn run_performance_test(
             threshold_samples: num_samples,
             max_iters: 20, // K-means iterations - reduced from 100 for performance
             retrain_strategy: RetrainStrategy::NoRetrain,
+            balance: false,
         })
         .label_method(LabelMethod::KMeans)
         .build()?;

@@ -113,6 +113,10 @@ pub struct TrainParams {
     pub epochs: usize,
     pub max_iters: usize, // Added for clustering iterations
     pub retrain_strategy: RetrainStrategy,
+    /// When true, training draws class-balanced (inverse-frequency weighted)
+    /// samples; when false (default) it samples uniformly.
+    #[serde(default)]
+    pub balance: bool,
 }
 
 impl Default for TrainParams {
@@ -123,8 +127,20 @@ impl Default for TrainParams {
             epochs: 3,
             max_iters: 10, // Default max iterations for clustering
             retrain_strategy: RetrainStrategy::NoRetrain,
+            balance: false,
         }
     }
+}
+
+pub(crate) fn class_balance_weights(ys: &[i64]) -> Vec<f64> {
+    use std::collections::HashMap;
+    let mut class_counts: HashMap<i64, usize> = HashMap::new();
+    for &y in ys {
+        *class_counts.entry(y).or_insert(0) += 1;
+    }
+    ys.iter()
+        .map(|&y| 1.0 / *class_counts.get(&y).unwrap_or(&1) as f64)
+        .collect()
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
@@ -198,6 +214,7 @@ mod tests {
             epochs: 5,
             max_iters: 20,
             retrain_strategy: RetrainStrategy::NoRetrain,
+            balance: false,
         };
 
         // Act
@@ -238,6 +255,7 @@ mod tests {
                 threshold_samples: 50,
                 max_iters: 10,
                 retrain_strategy: RetrainStrategy::NoRetrain,
+                balance: false,
             })
             .label_method(LabelMethod::KMeans)
             .build()
@@ -325,6 +343,7 @@ mod tests {
                 threshold_samples: 50,
                 max_iters: 10,
                 retrain_strategy: RetrainStrategy::NoRetrain,
+                balance: false,
             })
             .label_method(LabelMethod::KMeans)
             .build()
@@ -392,6 +411,7 @@ mod tests {
                 threshold_samples: 200,
                 max_iters: 10,
                 retrain_strategy: RetrainStrategy::NoRetrain,
+                balance: false,
             })
             .label_method(LabelMethod::KMeans)
             .build()
@@ -467,6 +487,7 @@ mod tests {
                 threshold_samples: 200,
                 max_iters: 10,
                 retrain_strategy: RetrainStrategy::NoRetrain,
+                balance: false,
             })
             .label_method(LabelMethod::KMeans)
             .quantize(true)
