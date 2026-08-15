@@ -215,7 +215,7 @@ impl<F: FloatElement + flat_knn::VectorType> Index<F> {
 
     #[log_time]
     fn delete_from_level(&mut self, id: Id) -> (bool, usize) {
-        for (level_idx, level) in &mut self.levels.iter_mut().enumerate() {
+        for (level_idx, level) in self.levels.iter_mut().enumerate().rev() {
             if level.storage.delete(&id, &self.delete_method) {
                 return (true, level_idx);
             }
