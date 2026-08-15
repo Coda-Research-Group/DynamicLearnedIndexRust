@@ -555,11 +555,10 @@ impl<F: FloatElement + VectorType> CompactionStrategy<F> {
                     Some((_, to_level_idx)) => {
                         let mut available_space = index.levels[to_level_idx].storage.free_space();
                         let mut source_levels = vec![];
-                        for level_idx in (to_level_idx..=0).rev() {
-                            // handling case where to_level_idx is zero
-                            if level_idx == to_level_idx {
-                                continue;
-                            }
+                        // Consolidate the shallower levels (indices below the target)
+                        // into `to_level_idx`, nearest first. The previous
+                        // `(to_level_idx..=0).rev()` was an empty range, making this a no-op.
+                        for level_idx in (0..to_level_idx).rev() {
                             let level_occupied = index.levels[level_idx].storage.occupied();
                             if level_occupied > 0 {
                                 if level_occupied > available_space {
