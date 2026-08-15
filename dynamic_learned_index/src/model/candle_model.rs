@@ -168,7 +168,7 @@ impl<F: FloatElement> crate::model::ModelInterface<F> for Model<F> {
         );
 
         let optim_config = candle_nn::ParamsAdamW {
-            lr: 1e-3,
+            lr: self.train_params.lr,
             weight_decay: 0.0, // Make it behave like regular Adam
             ..Default::default()
         };

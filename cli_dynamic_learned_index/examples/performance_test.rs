@@ -1,5 +1,5 @@
 use dynamic_learned_index::{
-    model::{ModelBuilder, ModelDevice, ModelInterface, ModelLayer, RetrainStrategy},
+    model::{ModelBuilder, ModelDevice, ModelInterface, ModelLayer, RetrainStrategy, DEFAULT_LR},
     structs::LabelMethod,
     DliResult, TrainParams,
 };
@@ -54,6 +54,8 @@ fn run_performance_test(
             max_iters: 20, // K-means iterations - reduced from 100 for performance
             retrain_strategy: RetrainStrategy::NoRetrain,
             balance: false,
+            lr: DEFAULT_LR,
+            early_stopping: false,
         })
         .label_method(LabelMethod::KMeans)
         .build()?;

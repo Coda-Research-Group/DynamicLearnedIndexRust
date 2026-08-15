@@ -21,6 +21,9 @@ pub enum DliError {
     #[error("Model creation failed: {0}")]
     ModelCreation(&'static str),
 
+    #[error("Unsupported configuration: {0}")]
+    Unsupported(&'static str),
+
     #[error("Generic error: {0}")]
     Generic(String),
 }

@@ -83,6 +83,16 @@ class DynamicLearnedIndexBuilder:
         self.config["balance"] = balance
         return self
 
+    def lr(self, lr: float) -> 'DynamicLearnedIndexBuilder':
+        """Set the Adam learning rate used during training."""
+        self.config["lr"] = lr
+        return self
+
+    def early_stopping(self, early_stopping: bool) -> 'DynamicLearnedIndexBuilder':
+        """Set early stopping. Not supported: building with True raises an error."""
+        self.config["early_stopping"] = early_stopping
+        return self
+
     def input_shape(self, shape: int) -> 'DynamicLearnedIndexBuilder':
         """Set the input shape."""
         self.config["input_shape"] = shape

@@ -3,7 +3,7 @@
 extern crate test;
 
 use dynamic_learned_index::model::{
-    Model, ModelBuilder, ModelInterface, ModelLayer, RetrainStrategy, TrainParams,
+    Model, ModelBuilder, ModelInterface, ModelLayer, RetrainStrategy, TrainParams, DEFAULT_LR,
 };
 use dynamic_learned_index::structs::LabelMethod;
 use dynamic_learned_index::ModelDevice;
@@ -40,6 +40,8 @@ fn model() -> Model<f32> {
             max_iters: 10,
             retrain_strategy: RetrainStrategy::NoRetrain,
             balance: false,
+            lr: DEFAULT_LR,
+            early_stopping: false,
         })
         .label_method(LabelMethod::KMeans)
         .build()

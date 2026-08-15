@@ -80,6 +80,16 @@ where
             builder = builder.balance(balance);
         }
     }
+    if let Some(v) = config.get_item("lr").ok().flatten() {
+        if let Ok(lr) = v.extract::<f64>() {
+            builder = builder.lr(lr);
+        }
+    }
+    if let Some(v) = config.get_item("early_stopping").ok().flatten() {
+        if let Ok(early_stopping) = v.extract::<bool>() {
+            builder = builder.early_stopping(early_stopping);
+        }
+    }
     if let Some(v) = config.get_item("input_shape").ok().flatten() {
         if let Ok(shape) = v.extract::<usize>() {
             builder = builder.input_shape(shape);

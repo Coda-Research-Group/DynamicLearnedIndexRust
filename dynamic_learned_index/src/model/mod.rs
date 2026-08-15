@@ -117,6 +117,20 @@ pub struct TrainParams {
     /// samples; when false (default) it samples uniformly.
     #[serde(default)]
     pub balance: bool,
+    /// Adam learning rate used during training.
+    #[serde(default = "default_lr")]
+    pub lr: f64,
+    /// Early stopping is not supported: constructing an index with this set to
+    /// true fails. Kept for config parity with the Python implementation.
+    #[serde(default)]
+    pub early_stopping: bool,
+}
+
+/// Default Adam learning rate used during training.
+pub const DEFAULT_LR: f64 = 1e-3;
+
+fn default_lr() -> f64 {
+    DEFAULT_LR
 }
 
 impl Default for TrainParams {
@@ -128,6 +142,8 @@ impl Default for TrainParams {
             max_iters: 10, // Default max iterations for clustering
             retrain_strategy: RetrainStrategy::NoRetrain,
             balance: false,
+            lr: default_lr(),
+            early_stopping: false,
         }
     }
 }
@@ -215,6 +231,8 @@ mod tests {
             max_iters: 20,
             retrain_strategy: RetrainStrategy::NoRetrain,
             balance: false,
+            lr: DEFAULT_LR,
+            early_stopping: false,
         };
 
         // Act
@@ -256,6 +274,8 @@ mod tests {
                 max_iters: 10,
                 retrain_strategy: RetrainStrategy::NoRetrain,
                 balance: false,
+                lr: DEFAULT_LR,
+                early_stopping: false,
             })
             .label_method(LabelMethod::KMeans)
             .build()
@@ -344,6 +364,8 @@ mod tests {
                 max_iters: 10,
                 retrain_strategy: RetrainStrategy::NoRetrain,
                 balance: false,
+                lr: DEFAULT_LR,
+                early_stopping: false,
             })
             .label_method(LabelMethod::KMeans)
             .build()
@@ -412,6 +434,8 @@ mod tests {
                 max_iters: 10,
                 retrain_strategy: RetrainStrategy::NoRetrain,
                 balance: false,
+                lr: DEFAULT_LR,
+                early_stopping: false,
             })
             .label_method(LabelMethod::KMeans)
             .build()
@@ -488,6 +512,8 @@ mod tests {
                 max_iters: 10,
                 retrain_strategy: RetrainStrategy::NoRetrain,
                 balance: false,
+                lr: DEFAULT_LR,
+                early_stopping: false,
             })
             .label_method(LabelMethod::KMeans)
             .quantize(true)

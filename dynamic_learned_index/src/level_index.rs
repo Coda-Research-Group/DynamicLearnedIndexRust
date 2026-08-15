@@ -565,7 +565,7 @@ impl<F: FloatElement> LevelIndex<F> {
 mod tests {
     use super::*;
     use crate::errors::DliResult;
-    use crate::model::RetrainStrategy;
+    use crate::model::{DEFAULT_LR, RetrainStrategy};
     use crate::structs::DistanceFn;
     use crate::{ModelConfig, ModelLayer, TrainParams};
 
@@ -673,6 +673,8 @@ mod tests {
                 max_iters: 100,
                 retrain_strategy: RetrainStrategy::NoRetrain,
                 balance: false,
+                lr: DEFAULT_LR,
+                early_stopping: false,
             },
             weights_path: None,
             quantize: false,

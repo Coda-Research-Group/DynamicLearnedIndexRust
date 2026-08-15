@@ -190,7 +190,9 @@ impl<F: FloatElement> crate::model::ModelInterface<F> for Model<F> {
             self.train_params.max_iters,
         );
         assert_eq!(ys.len(), sample_size);
-        let mut opt = nn::Adam::default().build(&self.vs, 1e-3).unwrap();
+        let mut opt = nn::Adam::default()
+            .build(&self.vs, self.train_params.lr)
+            .unwrap();
 
         let total_samples = ys.len();
         let n = total_samples as i64;

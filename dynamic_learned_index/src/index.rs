@@ -851,6 +851,16 @@ impl<F: FloatElement> IndexBuilder<F> {
         self
     }
 
+    pub fn lr(mut self, lr: f64) -> Self {
+        self.levels_config.model.train_params.lr = lr;
+        self
+    }
+
+    pub fn early_stopping(mut self, early_stopping: bool) -> Self {
+        self.levels_config.model.train_params.early_stopping = early_stopping;
+        self
+    }
+
     pub fn add_layer(mut self, layer: ModelLayer) -> Self {
         match self.model_layers.as_mut() {
             Some(layers) => layers.push(layer),
@@ -920,6 +930,11 @@ impl<F: FloatElement> IndexBuilder<F> {
 
     pub fn build(self) -> DliResult<Index<F>> {
         let levels_config = self.levels_config;
+        if levels_config.model.train_params.early_stopping {
+            return Err(DliError::Unsupported(
+                "early_stopping=true is not supported by the Rust implementation",
+            ));
+        }
         let buffer_size = self
             .buffer_size
             .ok_or(DliError::MissingAttribute("buffer_size"))?;
