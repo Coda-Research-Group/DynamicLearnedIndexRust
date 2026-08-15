@@ -555,9 +555,7 @@ impl<F: FloatElement + VectorType> CompactionStrategy<F> {
                     Some((_, to_level_idx)) => {
                         let mut available_space = index.levels[to_level_idx].storage.free_space();
                         let mut source_levels = vec![];
-                        // Consolidate the shallower levels (indices below the target)
-                        // into `to_level_idx`, nearest first. The previous
-                        // `(to_level_idx..=0).rev()` was an empty range, making this a no-op.
+
                         for level_idx in (0..to_level_idx).rev() {
                             let level_occupied = index.levels[level_idx].storage.occupied();
                             if level_occupied > 0 {
@@ -584,29 +582,26 @@ impl<F: FloatElement + VectorType> CompactionStrategy<F> {
         level_idx: usize,
         level_occupied: usize,
     ) -> Option<(usize, usize)> {
-        // First level
+        // Returns (source, target).
+
+        // 1. Push the current level *down* into a deeper (higher-index) level
+        //    with enough free space.
+        if let Some(lower_level_idx) = lower_level(index, level_idx, level_occupied) {
+            assert!(lower_level_idx > level_idx);
+            return Some((level_idx, lower_level_idx));
+        }
+        // 2. Otherwise push a higher (shallower, lower-index) level *down* into
+        //    the current level, filling it.
+        if let Some(upper_level_idx) = upper_level(index, level_idx) {
+            assert!(upper_level_idx < level_idx);
+            return Some((upper_level_idx, level_idx));
+        }
+        // 3. First level with nothing to move: flush the buffer instead.
         if level_idx == 0 {
-            if let Some(lower_level_idx) = lower_level(index, level_idx, level_occupied) {
-                assert!(lower_level_idx > level_idx);
-                return Some((level_idx, lower_level_idx));
-            };
             return None;
         }
-        // Middle level
-        if level_idx < index.levels.len() - 1 {
-            if let Some(lower_level_idx) = lower_level(index, level_idx, level_occupied) {
-                assert!(lower_level_idx > level_idx);
-                return Some((level_idx, lower_level_idx));
-            };
-        }
-        // Last level or no lower level found for middle level
-        // Try to move data to the upper level
-        let upper_level_idx = level_idx - 1;
-        if index.levels[upper_level_idx].storage.free_space() >= level_occupied {
-            return Some((level_idx, upper_level_idx));
-        }
-        // Top up current level from upper level
-        Some((level_idx - 1, level_idx))
+        // 4. Fall back to moving data one level up (the level above is empty).
+        Some((level_idx, level_idx - 1))
     }
 }
 
@@ -660,14 +655,33 @@ fn move_data<F: FloatElement>(
 }
 
 fn lower_level<F: FloatElement>(index: &Index<F>, level_idx: usize, size: usize) -> Option<usize> {
-    // Find the next level with enough free space
-    index
-        .levels
-        .iter()
-        .enumerate()
-        .skip(level_idx + 1)
-        .find(|(_, level)| level.storage.occupied() > 0 && level.storage.free_space() >= size)
-        .map(|(level_idx, _)| level_idx)
+    for idx in (level_idx + 1)..index.levels.len() {
+        let level = &index.levels[idx];
+        if level.storage.occupied() == 0 {
+            continue;
+        }
+        if level.storage.free_space() >= size {
+            return Some(idx);
+        }
+        break;
+    }
+    None
+}
+
+
+fn upper_level<F: FloatElement>(index: &Index<F>, level_idx: usize) -> Option<usize> {
+    let capacity = index.levels[level_idx].storage.free_space();
+    for idx in (0..level_idx).rev() {
+        let occupied = index.levels[idx].storage.occupied();
+        if occupied == 0 {
+            continue;
+        }
+        if occupied <= capacity {
+            return Some(idx);
+        }
+        break;
+    }
+    None
 }
 
 #[derive(Clone)]
