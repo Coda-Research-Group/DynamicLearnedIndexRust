@@ -695,12 +695,15 @@ fn move_data<F: FloatElement>(
         ids.extend(level_ids);
     }
     let n_inserted = ids.len();
-    let train_timings = index.levels[to_level_idx].retrain(&data)?;
-    let is_retraining = !train_timings.total.is_zero();
-    if is_retraining {
+    let target = &mut index.levels[to_level_idx];
+    let is_retraining = target.storage.size() == 0;
+    let train_timings = if is_retraining {
         debug!("index:retrain");
-    }
-    let insert_timings = index.levels[to_level_idx].insert_many(data, ids)?;
+        target.retrain(&data)?
+    } else {
+        TrainTimings::default()
+    };
+    let insert_timings = target.insert_many(data, ids)?;
     log_level_insert(
         "rebuild",
         to_level_idx,
