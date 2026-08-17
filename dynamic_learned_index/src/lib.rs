@@ -19,3 +19,18 @@ pub use structs::{
     SearchStrategy,
 };
 pub use types::{Array, ArrayNumType, ArraySlice, Id};
+
+#[cfg(feature = "measure_time")]
+macro_rules! timed {
+    ($e:expr) => {{
+        let __start = std::time::Instant::now();
+        (($e), __start.elapsed())
+    }};
+}
+#[cfg(not(feature = "measure_time"))]
+macro_rules! timed {
+    ($e:expr) => {{
+        (($e), std::time::Duration::ZERO)
+    }};
+}
+pub(crate) use timed;

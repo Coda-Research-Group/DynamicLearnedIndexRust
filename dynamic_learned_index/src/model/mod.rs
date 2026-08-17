@@ -8,12 +8,29 @@ use crate::errors::DliResult;
 use crate::structs::{FloatElement, LabelMethod};
 use crate::types::ArraySlice;
 use std::marker::PhantomData;
+use std::time::Duration;
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TrainTimings {
+    pub model_preparation: Duration,
+    pub sampling: Duration,
+    pub prep: Duration,
+    pub training: Duration,
+    pub total: Duration,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct InsertTimings {
+    pub model_evaluation: Duration,
+    pub insert: Duration,
+    pub total: Duration,
+}
 
 pub trait ModelInterface<F: FloatElement> {
     fn predict(&self, xs: &Self::TensorType) -> DliResult<Vec<(usize, f32)>>;
     fn predict_many(&self, xs: &[F]) -> DliResult<Vec<Vec<(usize, f32)>>>;
-    fn train(&mut self, xs: &ArraySlice) -> DliResult<()>;
-    fn retrain(&mut self, xs: &ArraySlice) -> DliResult<()>;
+    fn train(&mut self, xs: &ArraySlice) -> DliResult<TrainTimings>;
+    fn retrain(&mut self, xs: &ArraySlice) -> DliResult<TrainTimings>;
     fn dump(&self, weights_filename: PathBuf) -> DliResult<ModelConfig>;
     fn memory_usage(&self) -> usize;
     fn vec2tensor(&self, xs: &[f32]) -> DliResult<Self::TensorType>;

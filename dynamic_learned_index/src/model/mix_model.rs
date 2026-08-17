@@ -14,7 +14,10 @@ use log::debug;
 use measure_time_macro::log_time;
 use rand::Rng as _;
 
-use crate::{model::MixBackend, ArraySlice, DliResult, ModelConfig};
+use crate::{
+    model::{MixBackend, TrainTimings},
+    ArraySlice, DliResult, ModelConfig,
+};
 
 impl<F: FloatElement> crate::model::BaseModelBuilder<MixBackend, F> {
     pub fn build(&self) -> DliResult<Model<F>> {
@@ -77,14 +80,16 @@ impl<F: FloatElement> crate::model::ModelInterface<F> for Model<F> {
         self.candle_model.predict_many(xs)
     }
 
-    fn train(&mut self, xs: &ArraySlice) -> DliResult<()> {
-        self.tch_model.train(xs)?;
-        self.sync_weights_from_tch_to_candle()
+    fn train(&mut self, xs: &ArraySlice) -> DliResult<TrainTimings> {
+        let timings = self.tch_model.train(xs)?;
+        self.sync_weights_from_tch_to_candle()?;
+        Ok(timings)
     }
 
-    fn retrain(&mut self, xs: &ArraySlice) -> DliResult<()> {
-        self.tch_model.retrain(xs)?;
-        self.sync_weights_from_tch_to_candle()
+    fn retrain(&mut self, xs: &ArraySlice) -> DliResult<TrainTimings> {
+        let timings = self.tch_model.retrain(xs)?;
+        self.sync_weights_from_tch_to_candle()?;
+        Ok(timings)
     }
 
     fn dump(&self, weights_filename: PathBuf) -> DliResult<ModelConfig> {

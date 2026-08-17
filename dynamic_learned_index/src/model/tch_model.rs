@@ -1,4 +1,6 @@
+use crate::timed;
 use std::sync::Mutex;
+use std::time::Duration;
 use std::{marker::PhantomData, path::PathBuf};
 
 use log::debug;
@@ -14,7 +16,7 @@ use tch::{
 use crate::{
     clustering::{self},
     errors::{DliError, DliResult},
-    model::{ModelDevice, ModelLayer, RetrainStrategy, TchBackend, TrainParams},
+    model::{ModelDevice, ModelLayer, RetrainStrategy, TchBackend, TrainParams, TrainTimings},
     sampling,
     structs::{FloatElement, LabelMethod},
     types::ArraySlice,
@@ -174,22 +176,24 @@ impl<F: FloatElement> crate::model::ModelInterface<F> for Model<F> {
             .collect())
     }
 
-    fn train(&mut self, xs: &ArraySlice) -> DliResult<()> {
+    fn train(&mut self, xs: &ArraySlice) -> DliResult<TrainTimings> {
+        let ((sampling, prep, training), total) = timed!({
         let sample_size = sampling::select_sample_size(
             self.labels,
             xs.len() / self.input_shape,
             self.train_params.threshold_samples,
         );
         debug!(sample_size = sample_size, total = xs.len() / self.input_shape ; "model:train");
-        let xs = sampling::sample(xs, sample_size, self.input_shape, self.seed);
-        let ys = clustering::compute_labels(
+        let (xs, sampling) = timed!(sampling::sample(xs, sample_size, self.input_shape, self.seed));
+        let (ys, prep) = timed!(clustering::compute_labels(
             &xs,
             &self.label_method,
             self.labels,
             self.input_shape,
             self.train_params.max_iters,
-        );
+        ));
         assert_eq!(ys.len(), sample_size);
+        let (_, training) = timed!({
         let mut opt = nn::Adam::default()
             .build(&self.vs, self.train_params.lr)
             .unwrap();
@@ -247,20 +251,32 @@ impl<F: FloatElement> crate::model::ModelInterface<F> for Model<F> {
                 start += len;
             }
         }
-        Ok(())
+        });
+        (sampling, prep, training)
+        });
+        Ok(TrainTimings {
+            model_preparation: Duration::ZERO,
+            sampling,
+            prep,
+            training,
+            total,
+        })
     }
 
-    fn retrain(&mut self, _xs: &ArraySlice) -> DliResult<()> {
+    fn retrain(&mut self, _xs: &ArraySlice) -> DliResult<TrainTimings> {
         match self.train_params.retrain_strategy {
             RetrainStrategy::NoRetrain => {
                 debug!("No retraining performed as per strategy.");
+                Ok(TrainTimings::default())
             }
             RetrainStrategy::FromScratch => {
-                self.reset_model()?;
-                self.train(_xs)?;
+                let (_, model_preparation) = timed!(self.reset_model()?);
+                let mut timings = self.train(_xs)?;
+                timings.model_preparation = model_preparation;
+                timings.total += model_preparation;
+                Ok(timings)
             }
-        };
-        Ok(())
+        }
     }
 
     fn dump(&self, weights_filename: PathBuf) -> DliResult<ModelConfig> {

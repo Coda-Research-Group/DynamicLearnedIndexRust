@@ -1,9 +1,12 @@
 use crate::{
     bucket::{self, Bucket},
     cold_storage::ColdStorage,
-    model::{Model, ModelBuilder, ModelConfig, ModelDevice, ModelInterface as _},
+    model::{
+        InsertTimings, Model, ModelBuilder, ModelConfig, ModelDevice, ModelInterface as _,
+        TrainTimings,
+    },
     structs::{DiskBucket, DiskLevelIndex, FloatElement, HotDiskLevelIndex, LevelIndexConfig},
-    DeleteMethod, DistanceFn, DliError, DliResult, Id,
+    timed, DeleteMethod, DistanceFn, DliError, DliResult, Id,
 };
 #[cfg(feature = "measure_time")]
 use log::debug;
@@ -520,24 +523,23 @@ impl<F: FloatElement> LevelIndex<F> {
     }
 
     #[log_time]
-    pub(crate) fn train(&mut self, xs: &[F]) -> DliResult<()> {
-        self.model.train(&F::to_f32_slice(xs))?;
-        Ok(())
+    pub(crate) fn train(&mut self, xs: &[F]) -> DliResult<TrainTimings> {
+        self.model.train(&F::to_f32_slice(xs))
     }
 
     #[log_time]
-    pub(crate) fn retrain(&mut self, xs: &[F]) -> DliResult<()> {
-        self.model.retrain(&F::to_f32_slice(xs))?;
-        Ok(())
+    pub(crate) fn retrain(&mut self, xs: &[F]) -> DliResult<TrainTimings> {
+        self.model.retrain(&F::to_f32_slice(xs))
     }
 
-    pub(crate) fn insert_many(&mut self, records: Vec<F>, ids: Vec<Id>) -> DliResult<()> {
+    pub(crate) fn insert_many(&mut self, records: Vec<F>, ids: Vec<Id>) -> DliResult<InsertTimings> {
         let input_shape = self.model.input_shape;
         assert!(records.len() / input_shape == ids.len());
         if records.is_empty() {
-            return Ok(());
+            return Ok(InsertTimings::default());
         }
-        let assignments = self.model.predict_many(&records)?;
+        let ((model_evaluation, insert), total) = timed!({
+        let (assignments, model_evaluation) = timed!(self.model.predict_many(&records)?);
         let assignments = assignments
             .into_iter()
             .map(|mut assignment| {
@@ -545,8 +547,14 @@ impl<F: FloatElement> LevelIndex<F> {
                 assignment[0].0
             })
             .collect::<Vec<_>>();
-        self.storage.insert(records, ids, &assignments)?;
-        Ok(())
+        let (_, insert) = timed!(self.storage.insert(records, ids, &assignments)?);
+        (model_evaluation, insert)
+        });
+        Ok(InsertTimings {
+            model_evaluation,
+            insert,
+            total,
+        })
     }
 
     pub(crate) fn dump(&self, working_dir: &Path, level_id: usize) -> DliResult<DiskLevelIndex> {

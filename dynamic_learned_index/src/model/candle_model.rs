@@ -12,7 +12,11 @@ use rand::seq::SliceRandom;
 use std::path::PathBuf;
 
 use crate::errors::{DliError, DliResult};
-use crate::model::{CandleBackend, ModelDevice, ModelLayer, RetrainStrategy, TrainParams};
+use crate::model::{
+    CandleBackend, ModelDevice, ModelLayer, RetrainStrategy, TrainParams, TrainTimings,
+};
+use crate::timed;
+use std::time::Duration;
 use crate::structs::{FloatElement, LabelMethod};
 use crate::types::ArraySlice;
 use crate::{clustering, sampling, ModelConfig};
@@ -150,22 +154,22 @@ impl<F: FloatElement> crate::model::ModelInterface<F> for Model<F> {
         Ok(predictions)
     }
 
-    fn train(&mut self, xs: &ArraySlice) -> DliResult<()> {
+    fn train(&mut self, xs: &ArraySlice) -> DliResult<TrainTimings> {
+        let ((sampling, prep, training), total) = timed!({
         let sample_size = sampling::select_sample_size(
             self.labels,
             xs.len() / self.input_shape,
             self.train_params.threshold_samples,
         );
         debug!(sample_size = sample_size, total = xs.len() / self.input_shape ; "model:train");
-        let xs = sampling::sample(xs, sample_size, self.input_shape, self.seed);
-
-        let ys = clustering::compute_labels(
+        let (xs, sampling) = timed!(sampling::sample(xs, sample_size, self.input_shape, self.seed));
+        let (ys, prep) = timed!(clustering::compute_labels(
             &xs,
             &self.label_method,
             self.labels,
             self.input_shape,
             self.train_params.max_iters,
-        );
+        ));
 
         let optim_config = candle_nn::ParamsAdamW {
             lr: self.train_params.lr,
@@ -173,24 +177,35 @@ impl<F: FloatElement> crate::model::ModelInterface<F> for Model<F> {
             ..Default::default()
         };
         let mut opt = candle_nn::AdamW::new(self.varmap.all_vars(), optim_config)?;
-        self._train(&xs, &ys, &mut opt)?;
+        let (_, training) = timed!(self._train(&xs, &ys, &mut opt)?);
         if self.use_quantization {
             self.quantize()?;
         }
-        Ok(())
+        (sampling, prep, training)
+        });
+        Ok(TrainTimings {
+            model_preparation: Duration::ZERO,
+            sampling,
+            prep,
+            training,
+            total,
+        })
     }
 
-    fn retrain(&mut self, _xs: &ArraySlice) -> DliResult<()> {
+    fn retrain(&mut self, _xs: &ArraySlice) -> DliResult<TrainTimings> {
         match self.train_params.retrain_strategy {
             RetrainStrategy::NoRetrain => {
                 debug!("No retraining performed as per strategy.");
+                Ok(TrainTimings::default())
             }
             RetrainStrategy::FromScratch => {
-                reset_model(&mut self.varmap, &self.device)?;
-                self.train(_xs)?;
+                let (_, model_preparation) = timed!(reset_model(&mut self.varmap, &self.device)?);
+                let mut timings = self.train(_xs)?;
+                timings.model_preparation = model_preparation;
+                timings.total += model_preparation;
+                Ok(timings)
             }
-        };
-        Ok(())
+        }
     }
 
     fn dump(&self, weights_filename: PathBuf) -> DliResult<ModelConfig> {

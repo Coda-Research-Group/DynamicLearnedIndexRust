@@ -1,13 +1,13 @@
 use crate::{
     bucket::{Bucket, Buffer, BufferBuilder},
     level_index::{LevelIndex, LevelIndexBuilder, StorageContainer},
-    model::{ModelDevice, RetrainStrategy},
+    model::{InsertTimings, ModelDevice, RetrainStrategy, TrainTimings},
     structs::{
         CompactionStrategyConfig, DiskBuffer, DiskIndex, DiskLevelIndex, FloatElement, IndexConfig,
         LevelIndexConfig, RebuildStrategy, Records2Visit,
     },
-    DeleteMethod, DistanceFn, DliError, DliResult, Id, ModelLayer, SearchParams, SearchParamsT,
-    SearchStrategy,
+    timed, DeleteMethod, DistanceFn, DliError, DliResult, Id, ModelLayer, SearchParams,
+    SearchParamsT, SearchStrategy,
 };
 use flat_knn::VectorType;
 use log::debug;
@@ -19,6 +19,7 @@ use std::{
     num::NonZeroUsize,
     path::{absolute, Path, PathBuf},
     sync::Mutex,
+    time::Duration,
 };
 use typed_arena::Arena;
 
@@ -497,30 +498,43 @@ impl<F: FloatElement + VectorType> CompactionStrategy<F> {
                 match self.available_level(index) {
                     Some(level_idx) => {
                         let (data, ids) = self.lower_level_data(index, level_idx)?;
+                        let n_inserted = ids.len();
                         let level = &mut index.levels[level_idx];
-                        if level.storage.size() == 0 {
+                        let is_retraining = level.storage.size() == 0;
+                        let train_timings = if is_retraining {
                             debug!("index:retrain");
-                            level.retrain(&data)?;
-                        }
-                        debug!(
-                            level_idx = level_idx,
-                            data_size = ids.len();
-                            "index:compact",
+                            level.retrain(&data)?
+                        } else {
+                            TrainTimings::default()
+                        };
+                        let insert_timings = level.insert_many(data, ids)?;
+                        log_level_insert(
+                            "compaction",
+                            level_idx,
+                            n_inserted,
+                            is_retraining,
+                            Duration::ZERO,
+                            train_timings,
+                            insert_timings,
                         );
-                        level.insert_many(data, ids)?;
                     }
                     None => {
                         debug!("index:new_level");
-                        let level_idx = index.add_level()?;
+                        let (level_idx, allocation_time) = timed!(index.add_level()?);
                         let (data, ids) = self.lower_level_data(index, level_idx)?;
+                        let n_inserted = ids.len();
                         let level = &mut index.levels[level_idx];
-                        level.train(&data)?;
-                        debug!(
-                            level_idx = level_idx,
-                            data_size = ids.len();
-                            "index:compact",
+                        let train_timings = level.train(&data)?;
+                        let insert_timings = level.insert_many(data, ids)?;
+                        log_level_insert(
+                            "compaction",
+                            level_idx,
+                            n_inserted,
+                            false,
+                            allocation_time,
+                            train_timings,
+                            insert_timings,
                         );
-                        level.insert_many(data, ids)?;
                     }
                 };
             }
@@ -612,10 +626,46 @@ fn flush_buffer<F: FloatElement>(
 ) -> DliResult<()> {
     let buffer_occupied = index.buffer.occupied();
     let (data, ids) = index.buffer.get_data();
-    index.levels[level_idx].insert_many(data, ids)?;
+    let insert_timings = index.levels[level_idx].insert_many(data, ids)?;
+    log_level_insert(
+        "buffer_flush",
+        level_idx,
+        buffer_occupied,
+        false,
+        Duration::ZERO,
+        TrainTimings::default(),
+        insert_timings,
+    );
     assert!(index.buffer.occupied() == 0);
     assert!(index.levels[level_idx].storage.occupied() == level_occupied + buffer_occupied);
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn log_level_insert(
+    source: &str,
+    level_idx: usize,
+    n_inserted: usize,
+    is_retraining: bool,
+    allocation_time: Duration,
+    train: TrainTimings,
+    insert: InsertTimings,
+) {
+    debug!(
+        source = source,
+        level_idx = level_idx,
+        data_size = n_inserted,
+        is_retraining = is_retraining,
+        allocation_time:?=allocation_time,
+        model_preparation_time:?=train.model_preparation,
+        sampling_time:?=train.sampling,
+        training_prep_time:?=train.prep,
+        training_time:?=train.training,
+        training_total_time:?=train.total,
+        model_evaluation_time:?=insert.model_evaluation,
+        insert_into_level_time:?=insert.insert;
+        "index:compact"
+    );
 }
 
 fn move_data<F: FloatElement>(
@@ -644,7 +694,22 @@ fn move_data<F: FloatElement>(
         data.extend(level_data);
         ids.extend(level_ids);
     }
-    index.levels[to_level_idx].insert_many(data, ids)?;
+    let n_inserted = ids.len();
+    let train_timings = index.levels[to_level_idx].retrain(&data)?;
+    let is_retraining = !train_timings.total.is_zero();
+    if is_retraining {
+        debug!("index:retrain");
+    }
+    let insert_timings = index.levels[to_level_idx].insert_many(data, ids)?;
+    log_level_insert(
+        "rebuild",
+        to_level_idx,
+        n_inserted,
+        is_retraining,
+        Duration::ZERO,
+        train_timings,
+        insert_timings,
+    );
     assert!(from_level_idxs
         .iter()
         .all(|&idx| index.levels[idx].storage.occupied() == 0));
