@@ -2327,11 +2327,15 @@ mod tests {
             index.n_buckets()
         );
 
-        // Use the first 20 records as queries
+        // Query only the records that were compacted into the level. The last 9 are
+        // still in the buffer, which competes with the buckets at score 1.0 and may be
+        // skipped once the candidate budget is met, so they are not part of this check.
+        let n_in_level = index.level_occupied(0);
+        assert_eq!(n_in_level, 50, "the first 50 records should be in level 0");
         let mut correct_matches = 0;
         let mut total_searches = 0;
 
-        for (query_record, query_id) in inserted_records.iter() {
+        for (query_record, query_id) in inserted_records.iter().take(n_in_level) {
             // Search with k=1, ncandidates=10
             let search_strategy = SearchStrategy::ModelDriven(10);
             let search_params = (1usize, search_strategy);
