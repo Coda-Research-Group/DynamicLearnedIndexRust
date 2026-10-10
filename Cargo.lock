@@ -2393,7 +2393,7 @@ dependencies = [
 
 [[package]]
 name = "py_dynamic_learned_index"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "dynamic_learned_index",
  "half",

@@ -2,7 +2,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use dynamic_learned_index::{
-    model::RetrainStrategy, IndexBuilder, ModelDevice, ModelLayer, SearchParams,
+    model::RetrainStrategy, CompactionEvent, DeleteOutcome, IndexBuilder, ModelDevice, ModelLayer,
+    SearchParams, SearchStats,
 };
 use half::f16;
 use numpy::{IntoPyArray, PyArray1, PyArrayDyn, PyArrayMethods, PyReadonlyArray1};
@@ -179,6 +180,61 @@ where
         }
     }
     Ok(builder)
+}
+
+fn search_stats_to_dict<'py>(py: Python<'py>, stats: &SearchStats) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new(py);
+    dict.set_item("bucket_selection_time", stats.bucket_selection.as_secs_f64())?;
+    dict.set_item("bucket_ordering_time", stats.bucket_ordering.as_secs_f64())?;
+    dict.set_item("scan_time", stats.scan.as_secs_f64())?;
+    dict.set_item("visited_buckets", stats.visited_buckets)?;
+    dict.set_item("visited_records", stats.visited_records)?;
+    Ok(dict)
+}
+
+fn compaction_event_to_dict<'py>(
+    py: Python<'py>,
+    event: &CompactionEvent,
+) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new(py);
+    dict.set_item("level_idx", event.level_idx)?;
+    dict.set_item("n_inserted", event.n_inserted)?;
+    dict.set_item("allocated_new_level", event.allocated_new_level)?;
+    dict.set_item("is_retraining", event.is_retraining)?;
+    dict.set_item("allocation_time", event.allocation.as_secs_f64())?;
+    dict.set_item("model_preparation_time", event.train.model_preparation.as_secs_f64())?;
+    dict.set_item("sampling_time", event.train.sampling.as_secs_f64())?;
+    dict.set_item("training_prep_time", event.train.prep.as_secs_f64())?;
+    dict.set_item("training_time", event.train.training.as_secs_f64())?;
+    dict.set_item("training_total_time", event.train.total.as_secs_f64())?;
+    dict.set_item("model_evaluation_time", event.insert.model_evaluation.as_secs_f64())?;
+    dict.set_item("insert_into_level_time", event.insert.insert.as_secs_f64())?;
+    dict.set_item("insert_total_time", event.insert.total.as_secs_f64())?;
+    Ok(dict)
+}
+
+fn delete_outcome_to_dict<'py>(
+    py: Python<'py>,
+    outcome: &DeleteOutcome,
+) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new(py);
+    dict.set_item("deleted", outcome.deleted)?;
+    dict.set_item("level_idx", outcome.level)?;
+    dict.set_item("lookup_time", outcome.lookup.as_secs_f64())?;
+    dict.set_item("total_time", outcome.total.as_secs_f64())?;
+    match &outcome.rebuild {
+        Some(rebuild) => {
+            let rebuild_dict = PyDict::new(py);
+            rebuild_dict.set_item("degenerated_level", rebuild.degenerated_level)?;
+            rebuild_dict.set_item("source_levels", rebuild.source_levels.clone())?;
+            rebuild_dict.set_item("from_buffer", rebuild.from_buffer)?;
+            rebuild_dict.set_item("total_time", rebuild.total.as_secs_f64())?;
+            rebuild_dict.set_item("moved", compaction_event_to_dict(py, &rebuild.moved)?)?;
+            dict.set_item("rebuild", rebuild_dict)?;
+        }
+        None => dict.set_item("rebuild", py.None())?,
+    }
+    Ok(dict)
 }
 
 struct PyFileLike {
@@ -369,6 +425,50 @@ impl _DynamicLearnedIndexF16 {
         Ok(deleted)
     }
 
+    /// Same result as `search`, plus a dict with step times and visited counts.
+    #[pyo3(signature = (query, k, **py_kwargs))]
+    fn search_with_stats<'py>(
+        &self,
+        py: Python<'py>,
+        query: Bound<'py, PyArrayDyn<f16>>,
+        k: usize,
+        py_kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<(Bound<'py, PyArray1<u32>>, Bound<'py, PyDict>)> {
+        let query = array2vec(query);
+        let search_params = parse_search_kwargs(py_kwargs, k)?;
+        let result = py.detach(|| self.index.search_with_stats(&query, search_params));
+        let (ids, stats) = result?;
+        Ok((ids.into_pyarray(py), search_stats_to_dict(py, &stats)?))
+    }
+
+    /// Same as `insert`. Returns a dict describing the compaction it triggered, or None.
+    fn insert_with_stats<'py>(
+        &mut self,
+        py: Python<'py>,
+        record: Bound<'py, PyArrayDyn<f16>>,
+        id: u32,
+    ) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let record = array2vec(record);
+        let event = py.detach(|| {
+            self.index
+                .insert_with_stats(record, id)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+        })?;
+        match event {
+            Some(event) => Ok(Some(compaction_event_to_dict(py, &event)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Same as `delete`. Returns a dict with where the record was and the rebuild it triggered.
+    fn delete_with_stats<'py>(&mut self, py: Python<'py>, id: u32) -> PyResult<Bound<'py, PyDict>> {
+        let outcome = self
+            .index
+            .delete_with_stats(id)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        delete_outcome_to_dict(py, &outcome)
+    }
+
     fn n_buckets(&self) -> usize {
         self.index.n_buckets()
     }
@@ -546,6 +646,50 @@ impl _DynamicLearnedIndexF32 {
             .delete(id)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
         Ok(deleted)
+    }
+
+    /// Same result as `search`, plus a dict with step times and visited counts.
+    #[pyo3(signature = (query, k, **py_kwargs))]
+    fn search_with_stats<'py>(
+        &self,
+        py: Python<'py>,
+        query: PyReadonlyArray1<'py, f32>,
+        k: usize,
+        py_kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<(Bound<'py, PyArray1<u32>>, Bound<'py, PyDict>)> {
+        let query = array2vec_f32(query);
+        let search_params = parse_search_kwargs(py_kwargs, k)?;
+        let result = py.detach(|| self.index.search_with_stats(&query, search_params));
+        let (ids, stats) = result?;
+        Ok((ids.into_pyarray(py), search_stats_to_dict(py, &stats)?))
+    }
+
+    /// Same as `insert`. Returns a dict describing the compaction it triggered, or None.
+    fn insert_with_stats<'py>(
+        &mut self,
+        py: Python<'py>,
+        record: PyReadonlyArray1<'py, f32>,
+        id: u32,
+    ) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let record = array2vec_f32(record);
+        let event = py.detach(|| {
+            self.index
+                .insert_with_stats(record, id)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+        })?;
+        match event {
+            Some(event) => Ok(Some(compaction_event_to_dict(py, &event)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Same as `delete`. Returns a dict with where the record was and the rebuild it triggered.
+    fn delete_with_stats<'py>(&mut self, py: Python<'py>, id: u32) -> PyResult<Bound<'py, PyDict>> {
+        let outcome = self
+            .index
+            .delete_with_stats(id)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        delete_outcome_to_dict(py, &outcome)
     }
 
     fn n_buckets(&self) -> usize {

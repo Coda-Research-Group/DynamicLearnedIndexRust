@@ -1,11 +1,12 @@
 use serde::{Deserialize, Serialize};
-use std::{borrow::Cow, path::PathBuf};
+use std::{borrow::Cow, path::PathBuf, time::Duration};
 
 use crate::{
     constants::{
         DEFAULT_ARITY, DEFAULT_BUCKET_SIZE, DEFAULT_BUFFER_SIZE, DEFAULT_INPUT_SHAPE,
         DEFAULT_SEARCH_K, DEFAULT_SEARCH_N_CANDIDATES,
     },
+    model::{InsertTimings, TrainTimings},
     ModelConfig, ModelDevice,
 };
 
@@ -261,6 +262,63 @@ impl FloatElement for f16 {
 }
 
 pub(crate) type Records2Visit = Vec<(usize, usize, f32, usize)>;
+
+/// What one search did, returned by `Index::search_with_stats`.
+#[derive(Debug, Clone, Default)]
+pub struct SearchStats {
+    /// Evaluating the models of all levels.
+    pub bucket_selection: Duration,
+    /// Ordering the buckets and choosing the ones to visit.
+    pub bucket_ordering: Duration,
+    /// The k-NN search over the records of the visited buckets.
+    pub scan: Duration,
+    /// Number of visited buckets, the buffer included.
+    pub visited_buckets: usize,
+    /// Number of records in the visited buckets.
+    pub visited_records: usize,
+}
+
+/// One insertion of data into a level, caused by a compaction or a rebuild.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CompactionEvent {
+    /// Level the data was inserted into.
+    pub level_idx: usize,
+    pub n_inserted: usize,
+    /// The level was created for this insertion.
+    pub allocated_new_level: bool,
+    /// The level existed and was empty, so its model is subject to the retrain strategy.
+    pub is_retraining: bool,
+    pub allocation: Duration,
+    pub train: TrainTimings,
+    pub insert: InsertTimings,
+}
+
+/// A rebuild triggered by a delete that left a level under-utilized.
+#[derive(Debug, Clone, Default)]
+pub struct RebuildEvent {
+    /// The under-utilized level that triggered the rebuild.
+    pub degenerated_level: usize,
+    /// Levels whose data was moved. Empty when the buffer was flushed instead.
+    pub source_levels: Vec<usize>,
+    /// The buffer was flushed into the under-utilized level.
+    pub from_buffer: bool,
+    /// The insertion into the target level.
+    pub moved: CompactionEvent,
+    pub total: Duration,
+}
+
+/// What one delete did, returned by `Index::delete_with_stats`.
+#[derive(Debug, Clone, Default)]
+pub struct DeleteOutcome {
+    pub deleted: bool,
+    /// Level the record was deleted from; `None` if it was in the buffer or not found.
+    pub level: Option<usize>,
+    /// Finding and removing the record.
+    pub lookup: Duration,
+    /// `None` if no rebuild was needed or the rebuild strategy is `no_rebuild`.
+    pub rebuild: Option<RebuildEvent>,
+    pub total: Duration,
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct DiskBucket {

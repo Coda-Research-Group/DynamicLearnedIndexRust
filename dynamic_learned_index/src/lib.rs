@@ -15,22 +15,17 @@ pub use errors::{DliError, DliResult};
 pub use index::{CompactionStrategy, Index, IndexBuilder};
 pub use model::{ModelConfig, ModelDevice, ModelLayer, TrainParams};
 pub use structs::{
-    DeleteMethod, DistanceFn, IndexConfig, RebuildStrategy, SearchParams, SearchParamsT,
-    SearchStrategy,
+    CompactionEvent, DeleteMethod, DeleteOutcome, DistanceFn, IndexConfig, RebuildEvent,
+    RebuildStrategy, SearchParams, SearchParamsT, SearchStats, SearchStrategy,
 };
 pub use types::{Array, ArrayNumType, ArraySlice, Id};
 
-#[cfg(feature = "measure_time")]
+// Always measures: it is only used on the compaction and training path, and the
+// durations are returned to the caller in `CompactionEvent`.
 macro_rules! timed {
     ($e:expr) => {{
         let __start = std::time::Instant::now();
         (($e), __start.elapsed())
-    }};
-}
-#[cfg(not(feature = "measure_time"))]
-macro_rules! timed {
-    ($e:expr) => {{
-        (($e), std::time::Duration::ZERO)
     }};
 }
 pub(crate) use timed;

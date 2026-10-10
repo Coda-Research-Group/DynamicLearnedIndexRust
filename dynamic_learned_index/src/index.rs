@@ -3,13 +3,15 @@ use crate::{
     level_index::{LevelIndex, LevelIndexBuilder, StorageContainer},
     model::{InsertTimings, ModelDevice, RetrainStrategy, TrainTimings},
     structs::{
-        CompactionStrategyConfig, DiskBuffer, DiskIndex, DiskLevelIndex, FloatElement, IndexConfig,
-        LevelIndexConfig, RebuildStrategy, Records2Visit,
+        CompactionEvent, CompactionStrategyConfig, DeleteOutcome, DiskBuffer, DiskIndex,
+        DiskLevelIndex, FloatElement, IndexConfig, LevelIndexConfig, RebuildEvent, RebuildStrategy,
+        Records2Visit, SearchStats,
     },
     timed, DeleteMethod, DistanceFn, DliError, DliResult, Id, ModelLayer, SearchParams,
     SearchParamsT, SearchStrategy,
 };
 use flat_knn::VectorType;
+#[cfg(feature = "measure_time")]
 use log::debug;
 use lru::LruCache;
 use measure_time_macro::log_time;
@@ -19,9 +21,16 @@ use std::{
     num::NonZeroUsize,
     path::{absolute, Path, PathBuf},
     sync::Mutex,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use typed_arena::Arena;
+
+// Without the `measure_time` feature the log events in this file are compiled out,
+// so search, insert and delete contain no logging code at all.
+#[cfg(not(feature = "measure_time"))]
+macro_rules! debug {
+    ($($arg:tt)*) => {};
+}
 
 pub struct Index<F: FloatElement> {
     compaction_strategy: CompactionStrategy<F>,
@@ -52,6 +61,41 @@ impl<F: FloatElement + flat_knn::VectorType> Index<F> {
         let predictions = self.bucket_selection(query)?;
         let records2visit = self.records2visit(predictions, params.search_strategy);
         self.merge_results(records2visit, query, &params)
+    }
+
+    /// Same result as `search`, plus how long each step took and how much was visited.
+    pub fn search_with_stats<S>(&self, query: &[F], params: S) -> DliResult<(Vec<Id>, SearchStats)>
+    where
+        S: SearchParamsT,
+    {
+        let params = params.into_search_params();
+        let start = Instant::now();
+        let predictions = self.bucket_selection(query)?;
+        let bucket_selection = start.elapsed();
+
+        let start = Instant::now();
+        let records2visit = self.records2visit(predictions, params.search_strategy);
+        let bucket_ordering = start.elapsed();
+        let visited_buckets = records2visit.len();
+        let visited_records = records2visit
+            .iter()
+            .map(|(_, _, _, occupied)| *occupied)
+            .sum::<usize>();
+
+        let start = Instant::now();
+        let ids = self.merge_results(records2visit, query, &params)?;
+        let scan = start.elapsed();
+
+        Ok((
+            ids,
+            SearchStats {
+                bucket_selection,
+                bucket_ordering,
+                scan,
+                visited_buckets,
+                visited_records,
+            },
+        ))
     }
 
     #[log_time]
@@ -188,30 +232,64 @@ impl<F: FloatElement + flat_knn::VectorType> Index<F> {
 
     #[log_time]
     pub fn insert(&mut self, value: Vec<F>, id: Id) -> DliResult<()> {
+        self.insert_with_stats(value, id).map(|_| ())
+    }
+
+    /// Same as `insert`. Returns the compaction the insert triggered, or `None`
+    /// if the buffer was not full yet.
+    pub fn insert_with_stats(&mut self, value: Vec<F>, id: Id) -> DliResult<Option<CompactionEvent>> {
         self.buffer.insert(value, id);
         if self.buffer.has_space(1) {
-            return Ok(()); // buffer is not full yet
+            return Ok(None); // buffer is not full yet
         }
         debug!(levels = self.levels.len(), occupied = self.occupied(); "index:buffer_flush");
-        self.compaction_strategy.clone().compact(self)?;
+        let event = self.compaction_strategy.clone().compact(self)?;
         assert!(self.buffer.occupied() == 0);
-        Ok(())
+        Ok(Some(event))
     }
 
     #[log_time]
     pub fn delete(&mut self, id: Id) -> DliResult<bool> {
+        self.delete_with_stats(id).map(|outcome| outcome.deleted)
+    }
+
+    /// Same as `delete`. Also reports where the record was and the rebuild it triggered.
+    pub fn delete_with_stats(&mut self, id: Id) -> DliResult<DeleteOutcome> {
+        let start = Instant::now();
         if self.buffer.delete(&id) {
-            return Ok(true);
+            let lookup = start.elapsed();
+            return Ok(DeleteOutcome {
+                deleted: true,
+                level: None,
+                lookup,
+                rebuild: None,
+                total: lookup,
+            });
         }
         let (deleted, level_idx) = self.delete_from_level(id);
-        if deleted {
-            debug!(level_idx = level_idx, id = id; "index:delete");
-            if self.is_level_underutilized(level_idx) {
-                self.compaction_strategy.clone().rebuild(self, level_idx)?;
-            }
-            return Ok(true);
+        let lookup = start.elapsed();
+        if !deleted {
+            return Ok(DeleteOutcome {
+                deleted: false,
+                level: None,
+                lookup,
+                rebuild: None,
+                total: lookup,
+            });
         }
-        Ok(false)
+        debug!(level_idx = level_idx, id = id; "index:delete");
+        let rebuild = if self.is_level_underutilized(level_idx) {
+            self.compaction_strategy.clone().rebuild(self, level_idx)?
+        } else {
+            None
+        };
+        Ok(DeleteOutcome {
+            deleted: true,
+            level: Some(level_idx),
+            lookup,
+            rebuild,
+            total: start.elapsed(),
+        })
     }
 
     #[log_time]
@@ -491,9 +569,9 @@ impl<F: FloatElement + VectorType> CompactionStrategy<F> {
     }
 
     #[log_time]
-    pub fn compact(&self, index: &mut Index<F>) -> DliResult<()> {
+    pub fn compact(&self, index: &mut Index<F>) -> DliResult<CompactionEvent> {
         let original_occupied = index.occupied();
-        match self.strategy {
+        let event = match self.strategy {
             CompactionStrategyConfig::BentleySaxe(_) => {
                 match self.available_level(index) {
                     Some(level_idx) => {
@@ -519,7 +597,7 @@ impl<F: FloatElement + VectorType> CompactionStrategy<F> {
                             Duration::ZERO,
                             train_timings,
                             insert_timings,
-                        );
+                        )
                     }
                     None => {
                         debug!("index:new_level");
@@ -529,7 +607,7 @@ impl<F: FloatElement + VectorType> CompactionStrategy<F> {
                         let level = &mut index.levels[level_idx];
                         let train_timings = level.train(&data)?;
                         let insert_timings = level.insert_many(data, ids)?;
-                        log_level_insert(
+                        let mut event = log_level_insert(
                             "compaction",
                             level_idx,
                             n_inserted,
@@ -538,31 +616,42 @@ impl<F: FloatElement + VectorType> CompactionStrategy<F> {
                             train_timings,
                             insert_timings,
                         );
+                        event.allocated_new_level = true;
+                        event
                     }
-                };
+                }
             }
-        }
+        };
         assert_eq!(original_occupied, index.occupied());
-        Ok(())
+        Ok(event)
     }
 
+    /// Returns `None` when the rebuild strategy is `no_rebuild`.
     #[log_time]
-    pub fn rebuild(&self, index: &mut Index<F>, level_idx: usize) -> DliResult<()> {
+    pub fn rebuild(
+        &self,
+        index: &mut Index<F>,
+        level_idx: usize,
+    ) -> DliResult<Option<RebuildEvent>> {
         assert!(level_idx < index.levels.len());
+        let start = Instant::now();
         let level_occupied = index.levels[level_idx].storage.occupied();
         debug!(level_idx = level_idx, occupied = level_occupied; "index:rebuild");
-        match self.strategy {
+        let (source_levels, from_buffer, moved) = match self.strategy {
             CompactionStrategyConfig::BentleySaxe(RebuildStrategy::NoRebuild) => {
                 debug!("index:no_rebuild");
+                return Ok(None);
             }
             CompactionStrategyConfig::BentleySaxe(RebuildStrategy::BasicRebuild) => {
                 debug!("index:basic_rebuild");
                 match Self::find_source_target_levels(index, level_idx, level_occupied) {
                     Some((from_level_idx, to_level_idx)) => {
-                        move_data(index, &[from_level_idx], to_level_idx)?;
+                        let moved = move_data(index, &[from_level_idx], to_level_idx)?;
+                        (vec![from_level_idx], false, moved)
                     }
                     None => {
-                        flush_buffer(index, level_idx, level_occupied)?;
+                        let moved = flush_buffer(index, level_idx, level_occupied)?;
+                        (vec![], true, moved)
                     }
                 }
             }
@@ -583,15 +672,23 @@ impl<F: FloatElement + VectorType> CompactionStrategy<F> {
                                 source_levels.push(level_idx);
                             }
                         }
-                        move_data(index, &source_levels, to_level_idx)?;
+                        let moved = move_data(index, &source_levels, to_level_idx)?;
+                        (source_levels, false, moved)
                     }
                     None => {
-                        flush_buffer(index, level_idx, level_occupied)?;
+                        let moved = flush_buffer(index, level_idx, level_occupied)?;
+                        (vec![], true, moved)
                     }
                 }
             }
-        }
-        Ok(())
+        };
+        Ok(Some(RebuildEvent {
+            degenerated_level: level_idx,
+            source_levels,
+            from_buffer,
+            moved,
+            total: start.elapsed(),
+        }))
     }
 
     fn find_source_target_levels(
@@ -626,11 +723,11 @@ fn flush_buffer<F: FloatElement>(
     index: &mut Index<F>,
     level_idx: usize,
     level_occupied: usize,
-) -> DliResult<()> {
+) -> DliResult<CompactionEvent> {
     let buffer_occupied = index.buffer.occupied();
     let (data, ids) = index.buffer.get_data();
     let insert_timings = index.levels[level_idx].insert_many(data, ids)?;
-    log_level_insert(
+    let event = log_level_insert(
         "buffer_flush",
         level_idx,
         buffer_occupied,
@@ -641,10 +738,11 @@ fn flush_buffer<F: FloatElement>(
     );
     assert!(index.buffer.occupied() == 0);
     assert!(index.levels[level_idx].storage.occupied() == level_occupied + buffer_occupied);
-    Ok(())
+    Ok(event)
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(feature = "measure_time"), allow(unused_variables))]
 fn log_level_insert(
     source: &str,
     level_idx: usize,
@@ -653,7 +751,7 @@ fn log_level_insert(
     allocation_time: Duration,
     train: TrainTimings,
     insert: InsertTimings,
-) {
+) -> CompactionEvent {
     debug!(
         source = source,
         level_idx = level_idx,
@@ -669,13 +767,22 @@ fn log_level_insert(
         insert_into_level_time:?=insert.insert;
         "index:compact"
     );
+    CompactionEvent {
+        level_idx,
+        n_inserted,
+        allocated_new_level: false,
+        is_retraining,
+        allocation: allocation_time,
+        train,
+        insert,
+    }
 }
 
 fn move_data<F: FloatElement>(
     index: &mut Index<F>,
     from_level_idxs: &[usize],
     to_level_idx: usize,
-) -> DliResult<()> {
+) -> DliResult<CompactionEvent> {
     debug!(
         source_levels = from_level_idxs.iter().map(|idx| idx.to_string()).collect::<Vec<_>>().join(",").as_str(),
         to_level = to_level_idx;
@@ -707,7 +814,7 @@ fn move_data<F: FloatElement>(
         TrainTimings::default()
     };
     let insert_timings = target.insert_many(data, ids)?;
-    log_level_insert(
+    let event = log_level_insert(
         "rebuild",
         to_level_idx,
         n_inserted,
@@ -722,7 +829,7 @@ fn move_data<F: FloatElement>(
     assert!(
         index.levels[to_level_idx].storage.occupied() == from_levels_occupied + to_level_occupied
     );
-    Ok(())
+    Ok(event)
 }
 
 fn lower_level<F: FloatElement>(index: &Index<F>, level_idx: usize, size: usize) -> Option<usize> {
@@ -2938,6 +3045,106 @@ mod tests {
         let after = index.levels[0].buckets2visit_predictions(&query)?;
 
         Ok((before, after))
+    }
+
+    fn small_two_bucket_index(rebuild_strategy: RebuildStrategy) -> DliResult<Index<f32>> {
+        let mut config = create_test_config();
+        config.arity = 2;
+        config.levels.bucket_size = 10;
+        config.buffer_size = 10;
+        config.compaction_strategy = CompactionStrategyConfig::BentleySaxe(rebuild_strategy);
+        IndexBuilder::from_config(config).build()
+    }
+
+    fn small_record(i: usize) -> Vec<f32> {
+        vec![(i % 7 + 1) as f32, (i % 5 + 1) as f32, (i % 3 + 1) as f32]
+    }
+
+    #[test]
+    fn test_search_with_stats_matches_search() -> DliResult<()> {
+        let mut index = small_two_bucket_index(RebuildStrategy::NoRebuild)?;
+        for i in 0..35 {
+            index.insert(small_record(i), i as u32)?;
+        }
+        let query = vec![1.0_f32, 2.0, 3.0];
+
+        let ids = index.search(&query, (5usize, SearchStrategy::ModelDriven(20)))?;
+        let (ids_with_stats, stats) =
+            index.search_with_stats(&query, (5usize, SearchStrategy::ModelDriven(20)))?;
+
+        assert_eq!(ids, ids_with_stats);
+        assert!(stats.visited_buckets > 0);
+        assert!(stats.visited_records >= ids.len());
+        assert!(stats.visited_records <= index.occupied());
+        Ok(())
+    }
+
+    #[test]
+    fn test_insert_with_stats_reports_compactions() -> DliResult<()> {
+        let mut index = small_two_bucket_index(RebuildStrategy::NoRebuild)?;
+        let mut events = Vec::new();
+        for i in 0..40 {
+            if let Some(event) = index.insert_with_stats(small_record(i), i as u32)? {
+                events.push((
+                    i,
+                    event.level_idx,
+                    event.n_inserted,
+                    event.allocated_new_level,
+                    event.is_retraining,
+                ));
+            }
+        }
+        // (insert number, level, records inserted, new level, level was empty and existed)
+        assert_eq!(
+            events,
+            vec![
+                (9, 0, 10, true, false),
+                (19, 0, 10, false, false),
+                (29, 1, 30, true, false),
+                (39, 0, 10, false, true),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_delete_with_stats_reports_level_and_rebuild() -> DliResult<()> {
+        let mut index = small_two_bucket_index(RebuildStrategy::BasicRebuild)?;
+        // ids 0..9 end up in level 0, ids 10..14 stay in the buffer
+        for i in 0..15 {
+            index.insert(small_record(i), i as u32)?;
+        }
+
+        let missing = index.delete_with_stats(999)?;
+        assert!(!missing.deleted);
+        assert!(missing.rebuild.is_none());
+
+        let from_buffer = index.delete_with_stats(12)?;
+        assert!(from_buffer.deleted);
+        assert_eq!(from_buffer.level, None);
+        assert!(from_buffer.rebuild.is_none());
+
+        // level 0 drops to 9 records, below its minimum of 10: the buffer is flushed into it
+        let from_level = index.delete_with_stats(3)?;
+        assert!(from_level.deleted);
+        assert_eq!(from_level.level, Some(0));
+        let rebuild = from_level.rebuild.expect("the delete should trigger a rebuild");
+        assert_eq!(rebuild.degenerated_level, 0);
+        assert!(rebuild.from_buffer);
+        assert!(rebuild.source_levels.is_empty());
+        assert_eq!(rebuild.moved.level_idx, 0);
+        assert_eq!(rebuild.moved.n_inserted, 4);
+        assert_eq!(index.occupied(), 13);
+        assert_eq!(index.buffer_occupied(), 0);
+
+        let mut no_rebuild_index = small_two_bucket_index(RebuildStrategy::NoRebuild)?;
+        for i in 0..15 {
+            no_rebuild_index.insert(small_record(i), i as u32)?;
+        }
+        let outcome = no_rebuild_index.delete_with_stats(3)?;
+        assert!(outcome.deleted);
+        assert!(outcome.rebuild.is_none());
+        Ok(())
     }
 
     #[test]
