@@ -500,7 +500,10 @@ impl<F: FloatElement + VectorType> CompactionStrategy<F> {
                         let (data, ids) = self.lower_level_data(index, level_idx)?;
                         let n_inserted = ids.len();
                         let level = &mut index.levels[level_idx];
-                        let is_retraining = level.storage.size() == 0;
+                        // An existing level that is empty again gets a fresh model for
+                        // the data about to be inserted. `size()` is the level's fixed
+                        // capacity and is never zero, so emptiness is `occupied()`.
+                        let is_retraining = level.storage.occupied() == 0;
                         let train_timings = if is_retraining {
                             debug!("index:retrain");
                             level.retrain(&data)?
@@ -696,7 +699,7 @@ fn move_data<F: FloatElement>(
     }
     let n_inserted = ids.len();
     let target = &mut index.levels[to_level_idx];
-    let is_retraining = target.storage.size() == 0;
+    let is_retraining = target.storage.occupied() == 0;
     let train_timings = if is_retraining {
         debug!("index:retrain");
         target.retrain(&data)?
@@ -2886,6 +2889,72 @@ mod tests {
             recall * 100.0
         );
 
+        Ok(())
+    }
+
+    /// Fills level 0, empties it by compacting into a new level 1, then refills it.
+    /// Returns level 0's predictions for a fixed query before it was emptied and
+    /// after it was refilled.
+    ///
+    /// With buffer size 10, bucket size 10 and arity 2 (level 0 holds 20, level 1 holds 40):
+    /// - flush 1 creates level 0 and trains it,
+    /// - flush 2 fills level 0,
+    /// - flush 3 moves everything into a new level 1, leaving level 0 empty,
+    /// - flush 4 inserts into the empty level 0, which is the retrain point.
+    fn level0_predictions_before_and_after_refill(
+        retrain_strategy: RetrainStrategy,
+    ) -> DliResult<(Vec<(usize, f32)>, Vec<(usize, f32)>)> {
+        let mut config = create_test_config();
+        config.arity = 2;
+        config.levels.bucket_size = 10;
+        config.buffer_size = 10;
+        config.levels.model.train_params.retrain_strategy = retrain_strategy;
+        let mut index = IndexBuilder::from_config(config).build()?;
+
+        let record = |i: usize| vec![(i % 7 + 1) as f32, (i % 5 + 1) as f32, (i % 3 + 1) as f32];
+        let query = vec![1.0_f32, 2.0, 3.0];
+
+        for i in 0..20 {
+            index.insert(record(i), i as u32)?;
+        }
+        assert_eq!(index.n_levels(), 1);
+        assert_eq!(index.level_occupied(0), 20);
+        let before = index.levels[0].buckets2visit_predictions(&query)?;
+
+        for i in 20..30 {
+            index.insert(record(i), i as u32)?;
+        }
+        assert_eq!(index.n_levels(), 2);
+        assert_eq!(index.level_occupied(0), 0, "level 0 should be empty");
+
+        for i in 30..40 {
+            index.insert(record(i), i as u32)?;
+        }
+        assert_eq!(index.level_occupied(0), 10, "level 0 should be refilled");
+        let after = index.levels[0].buckets2visit_predictions(&query)?;
+
+        Ok((before, after))
+    }
+
+    #[test]
+    fn test_refilled_level_is_retrained_from_scratch() -> DliResult<()> {
+        let (before, after) =
+            level0_predictions_before_and_after_refill(RetrainStrategy::FromScratch)?;
+        assert_ne!(
+            before, after,
+            "from_scratch must replace the model of a refilled level"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_refilled_level_keeps_model_without_retrain() -> DliResult<()> {
+        let (before, after) =
+            level0_predictions_before_and_after_refill(RetrainStrategy::NoRetrain)?;
+        assert_eq!(
+            before, after,
+            "no_retrain must keep the model of a refilled level"
+        );
         Ok(())
     }
 }
