@@ -5,7 +5,9 @@ use dynamic_learned_index::{
     model::RetrainStrategy, IndexBuilder, ModelDevice, ModelLayer, SearchParams,
 };
 use half::f16;
-use numpy::{IntoPyArray, PyArray1, PyArrayDyn, PyArrayMethods, PyReadonlyArray1};
+use numpy::{
+    IntoPyArray, PyArray1, PyArrayDyn, PyArrayMethods, PyReadonlyArray1, PyReadonlyArrayDyn,
+};
 use pyo3::{
     prelude::*,
     types::{PyBytes, PyDict},
@@ -347,6 +349,22 @@ impl _DynamicLearnedIndexF16 {
         Ok(result?.into_pyarray(py))
     }
 
+    /// Searches a row-major (n, d) batch on `threads` threads, one query per task.
+    #[pyo3(signature = (queries, k, threads, **py_kwargs))]
+    fn search_many<'py>(
+        &self,
+        py: Python<'py>,
+        queries: Bound<'py, PyArrayDyn<f16>>,
+        k: usize,
+        threads: usize,
+        py_kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Vec<Bound<'py, PyArray1<u32>>>> {
+        let queries = array2vec(queries);
+        let search_params = parse_search_kwargs(py_kwargs, k)?;
+        let results = py.detach(|| self.index.search_many(&queries, search_params, threads))?;
+        Ok(results.into_iter().map(|ids| ids.into_pyarray(py)).collect())
+    }
+
     fn insert<'py>(
         &mut self,
         py: Python<'_>,
@@ -524,6 +542,22 @@ impl _DynamicLearnedIndexF32 {
         let search_params = parse_search_kwargs(py_kwargs, k)?;
         let result = py.detach(|| self.index.search(&query, search_params));
         Ok(result?.into_pyarray(py))
+    }
+
+    /// Searches a row-major (n, d) batch on `threads` threads, one query per task.
+    #[pyo3(signature = (queries, k, threads, **py_kwargs))]
+    fn search_many<'py>(
+        &self,
+        py: Python<'py>,
+        queries: PyReadonlyArrayDyn<'py, f32>,
+        k: usize,
+        threads: usize,
+        py_kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Vec<Bound<'py, PyArray1<u32>>>> {
+        let queries: Vec<f32> = queries.as_array().iter().copied().collect();
+        let search_params = parse_search_kwargs(py_kwargs, k)?;
+        let results = py.detach(|| self.index.search_many(&queries, search_params, threads))?;
+        Ok(results.into_iter().map(|ids| ids.into_pyarray(py)).collect())
     }
 
     fn insert<'py>(

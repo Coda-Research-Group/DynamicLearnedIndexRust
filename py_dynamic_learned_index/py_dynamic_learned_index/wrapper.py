@@ -202,6 +202,25 @@ class DynamicLearnedIndex:
             query, k, n_candidates=n_candidates, search_strategy=search_strategy
         )
 
+    def search_many(
+        self,
+        queries: np.ndarray,
+        k: int,
+        threads: int,
+        n_candidates: int = 100,
+        search_strategy: str = "knn",
+    ) -> List[np.ndarray]:
+        """Search every row of a (n, d) batch on `threads` threads; one id array per row."""
+        if queries.ndim != 2:
+            raise ValueError(f"search_many needs a 2-D (n, d) batch, got shape {queries.shape}")
+        return self._index.search_many(
+            np.ascontiguousarray(queries),
+            k,
+            threads,
+            n_candidates=n_candidates,
+            search_strategy=search_strategy,
+        )
+
     def insert(self, query: np.ndarray, id: int) -> None:
         """Insert a vector with given id."""
         self._index.insert(query, id)

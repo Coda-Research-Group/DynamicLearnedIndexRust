@@ -13,7 +13,10 @@ use flat_knn::VectorType;
 use log::debug;
 use lru::LruCache;
 use measure_time_macro::log_time;
-use rayon::iter::{IntoParallelRefIterator as _, ParallelIterator};
+use rayon::{
+    iter::{IntoParallelRefIterator as _, ParallelIterator},
+    slice::ParallelSlice as _,
+};
 use std::{
     fs::{self, create_dir, File},
     num::NonZeroUsize,
@@ -93,6 +96,41 @@ impl<F: FloatElement + flat_knn::VectorType> Index<F> {
         }
 
         Ok(all_results)
+    }
+
+    pub fn search_many<S>(&self, xs: &[F], params: S, threads: usize) -> DliResult<Vec<Vec<Id>>>
+    where
+        S: SearchParamsT,
+    {
+        if threads == 0 {
+            return Err(DliError::Generic("search_many needs threads >= 1".into()));
+        }
+        if xs.len() % self.input_shape != 0 {
+            return Err(DliError::Generic(format!(
+                "search_many got {} values, not a multiple of input_shape {}",
+                xs.len(),
+                self.input_shape
+            )));
+        }
+        let params = params.into_search_params();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .map_err(|e| DliError::Generic(e.to_string()))?;
+        // One query per task with its levels predicted in turn, so `threads` bounds the whole batch.
+        pool.install(|| {
+            xs.par_chunks_exact(self.input_shape)
+                .map(|query| {
+                    let predictions = self
+                        .levels
+                        .iter()
+                        .map(|level| Self::level_predictions(level, query))
+                        .collect::<DliResult<Vec<_>>>()?;
+                    let records2visit = self.records2visit(predictions, params.search_strategy);
+                    self.merge_results(records2visit, query, &params)
+                })
+                .collect()
+        })
     }
 
     #[log_time]
@@ -300,14 +338,16 @@ impl<F: FloatElement + flat_knn::VectorType> Index<F> {
     fn bucket_selection(&self, query: &[F]) -> DliResult<Vec<Vec<(usize, f32)>>> {
         self.levels
             .par_iter()
-            .map(|level| {
-                if level.storage.occupied() > 0 {
-                    level.buckets2visit_predictions(query)
-                } else {
-                    Ok(vec![])
-                }
-            })
+            .map(|level| Self::level_predictions(level, query))
             .collect::<DliResult<Vec<_>>>()
+    }
+
+    fn level_predictions(level: &LevelIndex<F>, query: &[F]) -> DliResult<Vec<(usize, f32)>> {
+        if level.storage.occupied() > 0 {
+            level.buckets2visit_predictions(query)
+        } else {
+            Ok(vec![])
+        }
     }
 
     #[log_time]
@@ -317,10 +357,13 @@ impl<F: FloatElement + flat_knn::VectorType> Index<F> {
         query: &[F],
         params: &SearchParams,
     ) -> DliResult<Vec<Id>> {
-        // Acquiring the lock for the whole time of function
-        // This is usually not a good approach but currently index does not support concurrent writes,
-        // so it is safe and does not bring any performance overhead
-        let mut cache_lock = self.cache.lock().unwrap();
+        // Held for the whole call, and only when a cold level exists: on a hot-only index the lock
+        // would serialise concurrent queries (search_many).
+        let has_cold_level = self
+            .levels
+            .iter()
+            .any(|level| matches!(level.storage.container, StorageContainer::Cold(_)));
+        let mut cache_lock = has_cold_level.then(|| self.cache.lock().unwrap());
 
         // Using an arena to avoid allocations for each record
         let cold_arena = Arena::new();
@@ -346,6 +389,9 @@ impl<F: FloatElement + flat_knn::VectorType> Index<F> {
                         }
                     }
                     StorageContainer::Cold(cold_storage) => {
+                        let cache_lock = cache_lock
+                            .as_mut()
+                            .expect("a cold level takes the cache lock above");
                         if let Some(cached_bucket) = cache_lock.get(&(level_idx, bucket_id)) {
                             for i in 0..cached_bucket.occupied() {
                                 // SAFETY:
@@ -379,9 +425,10 @@ impl<F: FloatElement + flat_knn::VectorType> Index<F> {
         };
 
         let res = res.into_iter().map(|(_, idx)| ids[idx]).collect();
-        // // Update cache
-        for (cold_bucket, key) in cold_arena.into_vec().into_iter().zip(cold_arena_keys) {
-            cache_lock.put(key, cold_bucket);
+        if let Some(cache_lock) = cache_lock.as_mut() {
+            for (cold_bucket, key) in cold_arena.into_vec().into_iter().zip(cold_arena_keys) {
+                cache_lock.put(key, cold_bucket);
+            }
         }
         Ok(res)
     }
@@ -2190,6 +2237,69 @@ mod tests {
         assert!(bulk_results[0].is_empty());
         assert!(bulk_results[1].is_empty());
 
+        Ok(())
+    }
+
+    fn build_l2_index(n: usize) -> DliResult<Index<f32>> {
+        let mut config = create_test_config();
+        config.distance_fn = DistanceFn::L2;
+        let mut index = IndexBuilder::from_config(config).build()?;
+        for i in 0..n {
+            index.insert(vec![i as f32, (i % 7) as f32, (i % 3) as f32], i as u32)?;
+        }
+        Ok(index)
+    }
+
+    #[test]
+    fn test_search_many_matches_search_per_query() -> DliResult<()> {
+        let index = build_l2_index(60)?;
+        assert!(index.n_levels() > 0);
+        let queries: Vec<f32> = (0..9)
+            .flat_map(|q| [q as f32 * 6.5, (q % 5) as f32, 1.0])
+            .collect();
+        let params = (5, SearchStrategy::ModelDriven(20));
+        let expected = queries
+            .chunks_exact(3)
+            .map(|q| index.search(q, params))
+            .collect::<DliResult<Vec<_>>>()?;
+
+        for threads in [1, 3] {
+            assert_eq!(index.search_many(&queries, params, threads)?, expected);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_search_many_rejects_zero_threads() -> DliResult<()> {
+        let index = build_l2_index(20)?;
+        let result = index.search_many(&[1.0, 2.0, 3.0], 5, 0);
+        assert!(matches!(result, Err(DliError::Generic(msg)) if msg.contains("threads")));
+        Ok(())
+    }
+
+    #[test]
+    fn test_search_many_rejects_a_partial_query() -> DliResult<()> {
+        let index = build_l2_index(20)?;
+        let result = index.search_many(&[1.0, 2.0, 3.0, 4.0], 5, 2);
+        assert!(matches!(result, Err(DliError::Generic(msg)) if msg.contains("input_shape")));
+        Ok(())
+    }
+
+    #[test]
+    fn test_hot_search_runs_while_the_cold_cache_is_locked() -> DliResult<()> {
+        let index = build_l2_index(40)?;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let guard = index.cache.lock().unwrap();
+            scope.spawn(|| sender.send(index.search(&[3.0, 3.0, 0.0], 5).is_ok()));
+            let finished = receiver.recv_timeout(Duration::from_secs(5));
+            drop(guard);
+            assert_eq!(
+                finished,
+                Ok(true),
+                "a hot-only search waited on the cold cache lock, so concurrent queries serialise"
+            );
+        });
         Ok(())
     }
 
