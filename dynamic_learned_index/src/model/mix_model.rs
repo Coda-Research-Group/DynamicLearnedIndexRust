@@ -110,12 +110,25 @@ impl<F: FloatElement> crate::model::ModelInterface<F> for Model<F> {
 }
 
 impl<F: FloatElement> Model<F> {
+    /// Hands the weights trained with tch over to the candle model through a file.
+    ///
+    /// The file is written to the system temporary directory (`TMPDIR` on Linux)
+    /// and removed again once candle has read it.
     pub fn sync_weights_from_tch_to_candle(&mut self) -> DliResult<()> {
         let random_id = rand::rng().random::<u64>();
-        let weights_path = std::path::PathBuf::from("/tmp")
-            .join(format!("mix_model_weights_{}.safetensors", random_id));
+        let weights_path = std::env::temp_dir().join(format!(
+            "mix_model_weights_{}_{}.safetensors",
+            std::process::id(),
+            random_id
+        ));
         self.tch_model.dump(weights_path.clone())?;
-        self.candle_model = self.candle_builder.weights_path(weights_path).build()?;
+        let candle_model = self
+            .candle_builder
+            .weights_path(weights_path.clone())
+            .build();
+        // candle has copied the weights (or failed); the file is not needed either way
+        let _ = std::fs::remove_file(&weights_path);
+        self.candle_model = candle_model?;
         Ok(())
     }
 }
