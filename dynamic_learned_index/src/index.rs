@@ -640,6 +640,13 @@ impl<F: FloatElement + VectorType> CompactionStrategy<F> {
             CompactionStrategyConfig::BentleySaxe(RebuildStrategy::GreedyRebuild) => {
                 debug!("index:greedy_rebuild");
                 match Self::find_source_target_levels(index, level_idx, level_occupied) {
+                    // Last resort of `find_source_target_levels`: the under-utilized level
+                    // moves one level up, into the empty level above it. Only that one
+                    // level is moved, there is nothing to gather.
+                    Some((from_level_idx, to_level_idx)) if from_level_idx > to_level_idx => {
+                        let moved = move_data(index, &[from_level_idx], to_level_idx)?;
+                        (vec![from_level_idx], false, moved)
+                    }
                     Some((_, to_level_idx)) => {
                         let mut available_space = index.levels[to_level_idx].storage.free_space();
                         let mut source_levels = vec![];
@@ -3124,6 +3131,38 @@ mod tests {
         let outcome = no_rebuild_index.delete(3)?;
         assert!(outcome.deleted);
         assert!(outcome.rebuild.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn test_greedy_rebuild_moves_underutilized_level_up() -> DliResult<()> {
+        let mut index = small_two_bucket_index(RebuildStrategy::GreedyRebuild)?;
+        // after 30 inserts level 0 is empty and level 1 holds all 30 records
+        for i in 0..30 {
+            index.insert(small_record(i), i as u32)?;
+        }
+        assert_eq!(index.level_occupied(0), 0);
+        assert_eq!(index.level_occupied(1), 30);
+
+        // level 1 needs at least 20 records; the first 10 deletes do not trigger a rebuild
+        for id in 0..10 {
+            let outcome = index.delete(id)?;
+            assert!(outcome.deleted);
+            assert!(outcome.rebuild.is_none());
+        }
+
+        // the 11th delete leaves 19: no deeper level exists and no shallower level
+        // holds data, so level 1 itself moves up into the empty level 0
+        let outcome = index.delete(10)?;
+        let rebuild = outcome.rebuild.expect("the delete should trigger a rebuild");
+        assert_eq!(rebuild.degenerated_level, 1);
+        assert_eq!(rebuild.source_levels, vec![1]);
+        assert!(!rebuild.from_buffer);
+        assert_eq!(rebuild.moved.level_idx, 0);
+        assert_eq!(rebuild.moved.n_inserted, 19);
+        assert_eq!(index.level_occupied(0), 19);
+        assert_eq!(index.level_occupied(1), 0);
+        assert_eq!(index.occupied(), 19);
         Ok(())
     }
 
