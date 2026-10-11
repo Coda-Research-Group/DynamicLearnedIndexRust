@@ -80,6 +80,10 @@ impl<F: FloatElement> crate::model::ModelInterface<F> for Model<F> {
         self.candle_model.predict_many(xs)
     }
 
+    fn predict_assignments(&self, xs: &[F]) -> DliResult<Vec<usize>> {
+        self.candle_model.predict_assignments(xs)
+    }
+
     fn train(&mut self, xs: &ArraySlice) -> DliResult<TrainTimings> {
         let timings = self.tch_model.train(xs)?;
         self.sync_weights_from_tch_to_candle()?;

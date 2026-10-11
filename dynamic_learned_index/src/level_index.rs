@@ -539,14 +539,7 @@ impl<F: FloatElement> LevelIndex<F> {
             return Ok(InsertTimings::default());
         }
         let ((model_evaluation, insert), total) = timed!({
-        let (assignments, model_evaluation) = timed!(self.model.predict_many(&records)?);
-        let assignments = assignments
-            .into_iter()
-            .map(|mut assignment| {
-                assignment.sort_by(|(_, a), (_, b)| b.total_cmp(a));
-                assignment[0].0
-            })
-            .collect::<Vec<_>>();
+        let (assignments, model_evaluation) = timed!(self.model.predict_assignments(&records)?);
         let (_, insert) = timed!(self.storage.insert(records, ids, &assignments)?);
         (model_evaluation, insert)
         });

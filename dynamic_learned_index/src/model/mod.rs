@@ -29,6 +29,10 @@ pub struct InsertTimings {
 pub trait ModelInterface<F: FloatElement> {
     fn predict(&self, xs: &Self::TensorType) -> DliResult<Vec<(usize, f32)>>;
     fn predict_many(&self, xs: &[F]) -> DliResult<Vec<Vec<(usize, f32)>>>;
+    /// For each record in `xs`, the label with the highest predicted probability.
+    /// Used to distribute records into buckets: unlike `predict_many`, it keeps one
+    /// number per record instead of one probability per record and label.
+    fn predict_assignments(&self, xs: &[F]) -> DliResult<Vec<usize>>;
     fn train(&mut self, xs: &ArraySlice) -> DliResult<TrainTimings>;
     fn retrain(&mut self, xs: &ArraySlice) -> DliResult<TrainTimings>;
     fn dump(&self, weights_filename: PathBuf) -> DliResult<ModelConfig>;
@@ -163,6 +167,18 @@ impl Default for TrainParams {
             early_stopping: false,
         }
     }
+}
+
+/// Index of the largest value. Of several equal largest values the first one wins,
+/// which is the label a stable descending sort by `total_cmp` would put first.
+pub(crate) fn first_argmax(values: &[f32]) -> usize {
+    let mut best = 0;
+    for (i, value) in values.iter().enumerate().skip(1) {
+        if value.total_cmp(&values[best]) == std::cmp::Ordering::Greater {
+            best = i;
+        }
+    }
+    best
 }
 
 pub(crate) fn class_balance_weights(ys: &[i64]) -> Vec<f64> {
@@ -360,6 +376,64 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_first_argmax() {
+        assert_eq!(first_argmax(&[0.1, 0.7, 0.2]), 1);
+        assert_eq!(first_argmax(&[0.5]), 0);
+        // of equal largest values the first one is taken
+        assert_eq!(first_argmax(&[0.2, 0.4, 0.4]), 1);
+        assert_eq!(first_argmax(&[1.0, 1.0, 0.0]), 0);
+    }
+
+    #[test]
+    fn test_predict_assignments_matches_predict_many() {
+        let input_nodes = 10;
+        let labels = 5;
+        let mut builder = ModelBuilder::default();
+        let mut model = builder
+            .device(ModelDevice::Cpu)
+            .input_nodes(input_nodes)
+            .add_layer(ModelLayer::Linear(32))
+            .add_layer(ModelLayer::ReLU)
+            .labels(labels)
+            .train_params(TrainParams {
+                epochs: 1,
+                batch_size: 10,
+                threshold_samples: 50,
+                max_iters: 10,
+                retrain_strategy: RetrainStrategy::NoRetrain,
+                balance: false,
+                lr: DEFAULT_LR,
+                early_stopping: false,
+            })
+            .label_method(LabelMethod::KMeans)
+            .build()
+            .unwrap();
+        let training_data: Vec<f32> = (0..100).map(|i| (i % 100) as f32 / 100.0).collect();
+        model.train(&training_data).unwrap();
+
+        let n_records = 23;
+        let records: Vec<f32> = (0..n_records * input_nodes as usize)
+            .map(|i| ((i * 7) % 100) as f32 / 100.0)
+            .collect();
+
+        // the way assignments were computed before: all probabilities, sorted per record
+        let expected: Vec<usize> = model
+            .predict_many(&records)
+            .unwrap()
+            .into_iter()
+            .map(|mut probabilities| {
+                probabilities.sort_by(|(_, a), (_, b)| b.total_cmp(a));
+                probabilities[0].0
+            })
+            .collect();
+
+        let assignments = model.predict_assignments(&records).unwrap();
+
+        assert_eq!(assignments.len(), n_records);
+        assert_eq!(assignments, expected);
     }
 
     #[test]

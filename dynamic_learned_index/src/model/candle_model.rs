@@ -154,6 +154,33 @@ impl<F: FloatElement> crate::model::ModelInterface<F> for Model<F> {
         Ok(predictions)
     }
 
+    #[log_time]
+    fn predict_assignments(&self, xs: &[F]) -> DliResult<Vec<usize>> {
+        let dim = xs.len() / self.input_shape;
+        let batch_size = 4096;
+
+        let mut assignments: Vec<usize> = Vec::with_capacity(dim);
+
+        for chunk in xs.chunks(batch_size * self.input_shape) {
+            let chunk_dim = chunk.len() / self.input_shape;
+            let dataset = Tensor::from_slice(chunk, (chunk_dim, self.input_shape), &self.device)?
+                .to_dtype(DType::F32)?;
+            let res = match self.use_quantization {
+                true => self.quant_model.as_ref().unwrap().forward(&dataset)?,
+                false => self.model.forward(&dataset)?,
+            };
+            let res = ops::softmax(&res, D::Minus1)?;
+            let res = res.to_vec2::<f32>()?;
+            // keep only the best label of each record; the probabilities of this
+            // batch are dropped before the next batch is evaluated
+            assignments.extend(
+                res.iter()
+                    .map(|probabilities| crate::model::first_argmax(probabilities)),
+            );
+        }
+        Ok(assignments)
+    }
+
     fn train(&mut self, xs: &ArraySlice) -> DliResult<TrainTimings> {
         let ((sampling, prep, training), total) = timed!({
         let sample_size = sampling::select_sample_size(
