@@ -41,7 +41,7 @@ The whole project is written in Rust and uses `cargo` as a build system. The pro
 
 **dynamic_learned_index** crate:
 
-- `measure_time`: profiling aid for development. Writes a debug log line with the duration of every function marked `#[log_time]` and the `index:*` events. Off by default; without it the search, insert and delete paths contain no logging code. Statistics for experiments come from `search_with_stats`, `insert_with_stats` and `delete_with_stats`, not from the log.
+- `measure_time`: profiling aid for development. Writes a debug log line with the duration of every function marked `#[log_time]` and the `index:*` events. Off by default; without it the search, insert and delete paths contain no logging code. Statistics for experiments are returned by `search`, `insert` and `delete`, not read from the log.
 - `tch`: enables the use of `tch-rs` library for model training
   - You need to have `libtorch` installed on your system to use this feature. Follow the installation instructions for `libtorch` from [tch-rs homepage](https://github.com/LaurentMazare/tch-rs).
 - `candle`: enabled by default, enables the use of `candle` library for model training
@@ -210,7 +210,7 @@ index.insert(vec![1.0, 2.0, 3.0], 0)?;
 
 // Search for k nearest neighbors
 let query = vec![1.0, 2.0, 3.0];
-let results = index.search(&query, 10)?;
+let (results, stats) = index.search(&query, 10)?;
 index.delete(0)?;
 ```
 

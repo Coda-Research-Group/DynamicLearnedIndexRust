@@ -34,7 +34,7 @@ index.insert(vector, id=1)
 
 # Search for k nearest neighbors
 query = [0.15, 0.25, 0.35, ...]
-results = index.search(query, k=10)  # Returns top-10 nearest neighbors
+results, stats = index.search(query, k=10)  # top-10 nearest neighbors, and what the search did
 
 # Delete an entry
 index.delete(id=1)
@@ -67,7 +67,7 @@ index.insert_bulk(vectors, ids)
 
 # Now you can search
 query = vectors[0]
-results = index.search(query, k=10)
+results, stats = index.search(query, k=10)
 ```
 
 ## Configuration
@@ -112,7 +112,7 @@ for i, vector in enumerate(vectors):
 
 # Search
 query = vectors[0]  # Use first vector as query
-neighbors = index.search(query, k=10)
+neighbors, stats = index.search(query, k=10)
 print(f"Top 10 neighbors: {neighbors}")
 ```
 

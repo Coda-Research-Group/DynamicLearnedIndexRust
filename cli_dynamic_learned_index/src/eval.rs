@@ -45,7 +45,9 @@ pub fn eval_queries(
             if let Some(bar) = &bar {
                 bar.inc(1);
             }
-            index.search(query, (max_k, search_strategy))
+            index
+                .search(query, (max_k, search_strategy))
+                .map(|(ids, _)| ids)
         })
         .collect::<DliResult<Vec<_>>>()?;
     let elapsed_time = start.elapsed();

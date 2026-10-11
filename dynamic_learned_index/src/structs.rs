@@ -263,7 +263,7 @@ impl FloatElement for f16 {
 
 pub(crate) type Records2Visit = Vec<(usize, usize, f32, usize)>;
 
-/// What one search did, returned by `Index::search_with_stats`.
+/// What one search did, returned by `Index::search`.
 #[derive(Debug, Clone, Default)]
 pub struct SearchStats {
     /// Evaluating the models of all levels.
@@ -307,7 +307,7 @@ pub struct RebuildEvent {
     pub total: Duration,
 }
 
-/// What one delete did, returned by `Index::delete_with_stats`.
+/// What one delete did, returned by `Index::delete`.
 #[derive(Debug, Clone, Default)]
 pub struct DeleteOutcome {
     pub deleted: bool,

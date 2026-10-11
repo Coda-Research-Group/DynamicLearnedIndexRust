@@ -389,45 +389,9 @@ impl _DynamicLearnedIndexF16 {
         Ok(_DynamicLearnedIndexF16 { index })
     }
 
+    /// Returns the ids of the nearest neighbours and a dict with step times and visited counts.
     #[pyo3(signature = (query, k, **py_kwargs))]
     fn search<'py>(
-        &self,
-        py: Python<'py>,
-        query: Bound<'py, PyArrayDyn<f16>>,
-        k: usize,
-        py_kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<Bound<'py, PyArray1<u32>>> {
-        let query = array2vec(query);
-        let search_params = parse_search_kwargs(py_kwargs, k)?;
-        let result = py.detach(|| self.index.search(&query, search_params));
-        Ok(result?.into_pyarray(py))
-    }
-
-    fn insert<'py>(
-        &mut self,
-        py: Python<'_>,
-        record: Bound<'py, PyArrayDyn<f16>>,
-        id: u32,
-    ) -> PyResult<()> {
-        let record = array2vec(record);
-        py.detach(|| {
-            self.index
-                .insert(record, id)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
-        })
-    }
-
-    fn delete(&mut self, id: u32) -> PyResult<bool> {
-        let deleted = self
-            .index
-            .delete(id)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
-        Ok(deleted)
-    }
-
-    /// Same result as `search`, plus a dict with step times and visited counts.
-    #[pyo3(signature = (query, k, **py_kwargs))]
-    fn search_with_stats<'py>(
         &self,
         py: Python<'py>,
         query: Bound<'py, PyArrayDyn<f16>>,
@@ -436,13 +400,13 @@ impl _DynamicLearnedIndexF16 {
     ) -> PyResult<(Bound<'py, PyArray1<u32>>, Bound<'py, PyDict>)> {
         let query = array2vec(query);
         let search_params = parse_search_kwargs(py_kwargs, k)?;
-        let result = py.detach(|| self.index.search_with_stats(&query, search_params));
+        let result = py.detach(|| self.index.search(&query, search_params));
         let (ids, stats) = result?;
         Ok((ids.into_pyarray(py), search_stats_to_dict(py, &stats)?))
     }
 
-    /// Same as `insert`. Returns a dict describing the compaction it triggered, or None.
-    fn insert_with_stats<'py>(
+    /// Returns a dict describing the compaction the insert triggered, or None.
+    fn insert<'py>(
         &mut self,
         py: Python<'py>,
         record: Bound<'py, PyArrayDyn<f16>>,
@@ -451,7 +415,7 @@ impl _DynamicLearnedIndexF16 {
         let record = array2vec(record);
         let event = py.detach(|| {
             self.index
-                .insert_with_stats(record, id)
+                .insert(record, id)
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
         })?;
         match event {
@@ -460,11 +424,11 @@ impl _DynamicLearnedIndexF16 {
         }
     }
 
-    /// Same as `delete`. Returns a dict with where the record was and the rebuild it triggered.
-    fn delete_with_stats<'py>(&mut self, py: Python<'py>, id: u32) -> PyResult<Bound<'py, PyDict>> {
+    /// Returns a dict with whether the record was found, where it was and the rebuild it triggered.
+    fn delete<'py>(&mut self, py: Python<'py>, id: u32) -> PyResult<Bound<'py, PyDict>> {
         let outcome = self
             .index
-            .delete_with_stats(id)
+            .delete(id)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
         delete_outcome_to_dict(py, &outcome)
     }
@@ -612,45 +576,9 @@ impl _DynamicLearnedIndexF32 {
         Ok(_DynamicLearnedIndexF32 { index })
     }
 
+    /// Returns the ids of the nearest neighbours and a dict with step times and visited counts.
     #[pyo3(signature = (query, k, **py_kwargs))]
     fn search<'py>(
-        &self,
-        py: Python<'py>,
-        query: PyReadonlyArray1<'py, f32>,
-        k: usize,
-        py_kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<Bound<'py, PyArray1<u32>>> {
-        let query = array2vec_f32(query);
-        let search_params = parse_search_kwargs(py_kwargs, k)?;
-        let result = py.detach(|| self.index.search(&query, search_params));
-        Ok(result?.into_pyarray(py))
-    }
-
-    fn insert<'py>(
-        &mut self,
-        py: Python<'_>,
-        record: PyReadonlyArray1<'py, f32>,
-        id: u32,
-    ) -> PyResult<()> {
-        let record = array2vec_f32(record);
-        py.detach(|| {
-            self.index
-                .insert(record, id)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
-        })
-    }
-
-    fn delete(&mut self, id: u32) -> PyResult<bool> {
-        let deleted = self
-            .index
-            .delete(id)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
-        Ok(deleted)
-    }
-
-    /// Same result as `search`, plus a dict with step times and visited counts.
-    #[pyo3(signature = (query, k, **py_kwargs))]
-    fn search_with_stats<'py>(
         &self,
         py: Python<'py>,
         query: PyReadonlyArray1<'py, f32>,
@@ -659,13 +587,13 @@ impl _DynamicLearnedIndexF32 {
     ) -> PyResult<(Bound<'py, PyArray1<u32>>, Bound<'py, PyDict>)> {
         let query = array2vec_f32(query);
         let search_params = parse_search_kwargs(py_kwargs, k)?;
-        let result = py.detach(|| self.index.search_with_stats(&query, search_params));
+        let result = py.detach(|| self.index.search(&query, search_params));
         let (ids, stats) = result?;
         Ok((ids.into_pyarray(py), search_stats_to_dict(py, &stats)?))
     }
 
-    /// Same as `insert`. Returns a dict describing the compaction it triggered, or None.
-    fn insert_with_stats<'py>(
+    /// Returns a dict describing the compaction the insert triggered, or None.
+    fn insert<'py>(
         &mut self,
         py: Python<'py>,
         record: PyReadonlyArray1<'py, f32>,
@@ -674,7 +602,7 @@ impl _DynamicLearnedIndexF32 {
         let record = array2vec_f32(record);
         let event = py.detach(|| {
             self.index
-                .insert_with_stats(record, id)
+                .insert(record, id)
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
         })?;
         match event {
@@ -683,11 +611,11 @@ impl _DynamicLearnedIndexF32 {
         }
     }
 
-    /// Same as `delete`. Returns a dict with where the record was and the rebuild it triggered.
-    fn delete_with_stats<'py>(&mut self, py: Python<'py>, id: u32) -> PyResult<Bound<'py, PyDict>> {
+    /// Returns a dict with whether the record was found, where it was and the rebuild it triggered.
+    fn delete<'py>(&mut self, py: Python<'py>, id: u32) -> PyResult<Bound<'py, PyDict>> {
         let outcome = self
             .index
-            .delete_with_stats(id)
+            .delete(id)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
         delete_outcome_to_dict(py, &outcome)
     }

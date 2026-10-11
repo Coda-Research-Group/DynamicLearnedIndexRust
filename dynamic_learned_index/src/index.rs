@@ -52,19 +52,10 @@ pub struct Index<F: FloatElement> {
 }
 
 impl<F: FloatElement + flat_knn::VectorType> Index<F> {
+    /// Returns the ids of the nearest neighbours, and how long each step of the
+    /// search took and how much was visited.
     #[log_time]
-    pub fn search<S>(&self, query: &[F], params: S) -> DliResult<Vec<Id>>
-    where
-        S: SearchParamsT,
-    {
-        let params = params.into_search_params();
-        let predictions = self.bucket_selection(query)?;
-        let records2visit = self.records2visit(predictions, params.search_strategy);
-        self.merge_results(records2visit, query, &params)
-    }
-
-    /// Same result as `search`, plus how long each step took and how much was visited.
-    pub fn search_with_stats<S>(&self, query: &[F], params: S) -> DliResult<(Vec<Id>, SearchStats)>
+    pub fn search<S>(&self, query: &[F], params: S) -> DliResult<(Vec<Id>, SearchStats)>
     where
         S: SearchParamsT,
     {
@@ -230,14 +221,9 @@ impl<F: FloatElement + flat_knn::VectorType> Index<F> {
         self.levels_config.clone()
     }
 
+    /// Returns the compaction the insert triggered, or `None` if the buffer was not full yet.
     #[log_time]
-    pub fn insert(&mut self, value: Vec<F>, id: Id) -> DliResult<()> {
-        self.insert_with_stats(value, id).map(|_| ())
-    }
-
-    /// Same as `insert`. Returns the compaction the insert triggered, or `None`
-    /// if the buffer was not full yet.
-    pub fn insert_with_stats(&mut self, value: Vec<F>, id: Id) -> DliResult<Option<CompactionEvent>> {
+    pub fn insert(&mut self, value: Vec<F>, id: Id) -> DliResult<Option<CompactionEvent>> {
         self.buffer.insert(value, id);
         if self.buffer.has_space(1) {
             return Ok(None); // buffer is not full yet
@@ -248,13 +234,9 @@ impl<F: FloatElement + flat_knn::VectorType> Index<F> {
         Ok(Some(event))
     }
 
+    /// Reports whether the record was found, where it was and the rebuild the delete triggered.
     #[log_time]
-    pub fn delete(&mut self, id: Id) -> DliResult<bool> {
-        self.delete_with_stats(id).map(|outcome| outcome.deleted)
-    }
-
-    /// Same as `delete`. Also reports where the record was and the rebuild it triggered.
-    pub fn delete_with_stats(&mut self, id: Id) -> DliResult<DeleteOutcome> {
+    pub fn delete(&mut self, id: Id) -> DliResult<DeleteOutcome> {
         let start = Instant::now();
         if self.buffer.delete(&id) {
             let lookup = start.elapsed();
@@ -1507,13 +1489,13 @@ mod tests {
         // Run queries and store results from original index
         let original_results = test_queries
             .iter()
-            .map(|query| index.search(query.as_slice(), 10))
+            .map(|query| index.search(query.as_slice(), 10).map(|(ids, _)| ids))
             .collect::<DliResult<Vec<_>>>()?;
 
         // Also get verbose search statistics
         let original_stats = test_queries
             .iter()
-            .map(|query| index.search(query.as_slice(), 10))
+            .map(|query| index.search(query.as_slice(), 10).map(|(ids, _)| ids))
             .collect::<DliResult<Vec<_>>>()?;
 
         // Save index to temporary directory
@@ -1547,12 +1529,12 @@ mod tests {
         // Run same queries on loaded index
         let loaded_results = test_queries
             .iter()
-            .map(|query| loaded_index.search(query.as_slice(), 10))
+            .map(|query| loaded_index.search(query.as_slice(), 10).map(|(ids, _)| ids))
             .collect::<DliResult<Vec<_>>>()?;
 
         let loaded_stats = test_queries
             .iter()
-            .map(|query| loaded_index.search(query.as_slice(), 10))
+            .map(|query| loaded_index.search(query.as_slice(), 10).map(|(ids, _)| ids))
             .collect::<DliResult<Vec<_>>>()?;
 
         // Verify search results match
@@ -1657,13 +1639,13 @@ mod tests {
         // Run queries and store results from original index
         let original_results = test_queries
             .iter()
-            .map(|query| index.search(query.as_slice(), 10))
+            .map(|query| index.search(query.as_slice(), 10).map(|(ids, _)| ids))
             .collect::<DliResult<Vec<_>>>()?;
 
         // Also get verbose search statistics
         let original_stats = test_queries
             .iter()
-            .map(|query| index.search(query.as_slice(), 10))
+            .map(|query| index.search(query.as_slice(), 10).map(|(ids, _)| ids))
             .collect::<DliResult<Vec<_>>>()?;
 
         // Save index to temporary directory
@@ -1697,12 +1679,12 @@ mod tests {
         // Run same queries on loaded index
         let loaded_results = test_queries
             .iter()
-            .map(|query| loaded_index.search(query.as_slice(), 10))
+            .map(|query| loaded_index.search(query.as_slice(), 10).map(|(ids, _)| ids))
             .collect::<DliResult<Vec<_>>>()?;
 
         let loaded_stats = test_queries
             .iter()
-            .map(|query| loaded_index.search(query.as_slice(), 10))
+            .map(|query| loaded_index.search(query.as_slice(), 10).map(|(ids, _)| ids))
             .collect::<DliResult<Vec<_>>>()?;
 
         // Verify search results match
@@ -1793,7 +1775,7 @@ mod tests {
             "Should have created levels during insertion"
         );
         // delete one record
-        let deleted = index.delete(0)?;
+        let deleted = index.delete(0)?.deleted;
         assert!(deleted, "Should delete the record");
         let occupied_after_insert = index.occupied();
         assert_eq!(occupied_after_insert, 99);
@@ -1812,13 +1794,13 @@ mod tests {
         // Run queries and store results from original index
         let original_results = test_queries
             .iter()
-            .map(|query| index.search(query.as_slice(), 10))
+            .map(|query| index.search(query.as_slice(), 10).map(|(ids, _)| ids))
             .collect::<DliResult<Vec<_>>>()?;
 
         // Also get verbose search statistics
         let original_stats = test_queries
             .iter()
-            .map(|query| index.search(query.as_slice(), 10))
+            .map(|query| index.search(query.as_slice(), 10).map(|(ids, _)| ids))
             .collect::<DliResult<Vec<_>>>()?;
 
         // Save index to temporary directory
@@ -1852,12 +1834,12 @@ mod tests {
         // Run same queries on loaded index
         let loaded_results = test_queries
             .iter()
-            .map(|query| loaded_index.search(query.as_slice(), 10))
+            .map(|query| loaded_index.search(query.as_slice(), 10).map(|(ids, _)| ids))
             .collect::<DliResult<Vec<_>>>()?;
 
         let loaded_stats = test_queries
             .iter()
-            .map(|query| loaded_index.search(query.as_slice(), 10))
+            .map(|query| loaded_index.search(query.as_slice(), 10).map(|(ids, _)| ids))
             .collect::<DliResult<Vec<_>>>()?;
 
         // Verify search results match
@@ -1988,13 +1970,13 @@ mod tests {
 
         // Search for the first item
         // We use exact match search (k=1)
-        let results = index.search(&vec1, 1)?;
+        let (results, _) = index.search(&vec1, 1)?;
 
         assert!(!results.is_empty(), "Search should return results");
         assert_eq!(results[0], id1, "Should find the inserted ID in buffer");
 
         // Search for the second item
-        let results = index.search(&vec2, 1)?;
+        let (results, _) = index.search(&vec2, 1)?;
         assert!(!results.is_empty());
         assert_eq!(results[0], id2);
 
@@ -2019,7 +2001,7 @@ mod tests {
         assert_eq!(index.occupied(), 2, "Should have 2 items initially");
 
         // Delete the first item
-        let deleted = index.delete(id1)?;
+        let deleted = index.delete(id1)?.deleted;
         assert!(deleted, "Should return deleted item");
 
         // Verify occupancy decreased
@@ -2027,13 +2009,13 @@ mod tests {
 
         // Verify item is gone from search
         // Searching for vec1 should now return id2 as it is the only remaining item
-        let results = index.search(&vec1, 1)?;
+        let (results, _) = index.search(&vec1, 1)?;
         assert!(!results.is_empty());
         assert_ne!(results[0], id1, "Deleted ID should not be found");
         assert_eq!(results[0], id2, "Should find the other item");
 
         // Verify the other item is still there and findable
-        let results2 = index.search(&vec2, 1)?;
+        let (results2, _) = index.search(&vec2, 1)?;
         assert!(!results2.is_empty());
         assert_eq!(results2[0], id2);
 
@@ -2161,12 +2143,12 @@ mod tests {
         let vec_to_delete = vec![5.0, 5.0, 5.0];
 
         // Verify it exists before deletion
-        let results = index.search(&vec_to_delete, 1)?;
+        let (results, _) = index.search(&vec_to_delete, 1)?;
         assert!(!results.is_empty());
         assert_eq!(results[0], id_to_delete);
 
         // Delete it
-        let deleted = index.delete(id_to_delete)?;
+        let deleted = index.delete(id_to_delete)?.deleted;
         assert!(deleted, "Should return deleted item");
 
         // Verify occupancy decreased
@@ -2174,7 +2156,7 @@ mod tests {
 
         // Verify it is gone
         // Searching for the deleted vector should return the nearest neighbor (e.g. 4 or 6), but not 5
-        let results = index.search(&vec_to_delete, 1)?;
+        let (results, _) = index.search(&vec_to_delete, 1)?;
         if !results.is_empty() {
             assert_ne!(results[0], id_to_delete, "Deleted ID should not be found");
         }
@@ -2189,7 +2171,7 @@ mod tests {
 
         // Search for any vector
         let query = vec![1.0, 2.0, 3.0];
-        let results = index.search(&query, 5)?;
+        let (results, _) = index.search(&query, 5)?;
 
         assert!(
             results.is_empty(),
@@ -2446,7 +2428,7 @@ mod tests {
             // Search with k=1, ncandidates=10
             let search_strategy = SearchStrategy::ModelDriven(10);
             let search_params = (1usize, search_strategy);
-            let results = index.search(query_record, search_params)?;
+            let (results, _) = index.search(query_record, search_params)?;
 
             total_searches += 1;
 
@@ -2564,7 +2546,7 @@ mod tests {
             // Search with k=1, ncandidates=10
             let search_strategy = SearchStrategy::ModelDriven(10);
             let search_params = (1usize, search_strategy);
-            let results = index.search(query_record, search_params)?;
+            let (results, _) = index.search(query_record, search_params)?;
 
             total_searches += 1;
 
@@ -2656,7 +2638,7 @@ mod tests {
         let query = (0..10)
             .map(|j| ((0 * 10 + j) as f32 / 100.0).sin())
             .collect::<Vec<f32>>();
-        let results = index.search(&query, (5usize, SearchStrategy::ModelDriven(10)))?;
+        let (results, _) = index.search(&query, (5usize, SearchStrategy::ModelDriven(10)))?;
         assert!(!results.is_empty(), "Search should return results");
 
         Ok(())
@@ -2754,7 +2736,7 @@ mod tests {
             // Search with k=1, ncandidates=10
             let search_strategy = SearchStrategy::ModelDriven(10);
             let search_params = (1usize, search_strategy);
-            let results = index.search(query_record, search_params)?;
+            let (results, _) = index.search(query_record, search_params)?;
 
             total_searches += 1;
 
@@ -2888,7 +2870,7 @@ mod tests {
 
         for query_id in 0..num_queries {
             let query_vec = vec![query_id as f32, query_id as f32, query_id as f32];
-            let results = index.search(
+            let (results, _) = index.search(
                 &query_vec,
                 SearchParams {
                     k: k,
@@ -2965,7 +2947,7 @@ mod tests {
 
         for query_id in 0..num_queries {
             let query_vec = vec![query_id as f32, query_id as f32, query_id as f32];
-            let results = index.search(
+            let (results, _) = index.search(
                 &query_vec,
                 SearchParams {
                     k: k,
@@ -3061,18 +3043,16 @@ mod tests {
     }
 
     #[test]
-    fn test_search_with_stats_matches_search() -> DliResult<()> {
+    fn test_search_reports_stats() -> DliResult<()> {
         let mut index = small_two_bucket_index(RebuildStrategy::NoRebuild)?;
         for i in 0..35 {
             index.insert(small_record(i), i as u32)?;
         }
         let query = vec![1.0_f32, 2.0, 3.0];
 
-        let ids = index.search(&query, (5usize, SearchStrategy::ModelDriven(20)))?;
-        let (ids_with_stats, stats) =
-            index.search_with_stats(&query, (5usize, SearchStrategy::ModelDriven(20)))?;
+        let (ids, stats) = index.search(&query, (5usize, SearchStrategy::ModelDriven(20)))?;
 
-        assert_eq!(ids, ids_with_stats);
+        assert!(!ids.is_empty());
         assert!(stats.visited_buckets > 0);
         assert!(stats.visited_records >= ids.len());
         assert!(stats.visited_records <= index.occupied());
@@ -3080,11 +3060,11 @@ mod tests {
     }
 
     #[test]
-    fn test_insert_with_stats_reports_compactions() -> DliResult<()> {
+    fn test_insert_reports_compactions() -> DliResult<()> {
         let mut index = small_two_bucket_index(RebuildStrategy::NoRebuild)?;
         let mut events = Vec::new();
         for i in 0..40 {
-            if let Some(event) = index.insert_with_stats(small_record(i), i as u32)? {
+            if let Some(event) = index.insert(small_record(i), i as u32)? {
                 events.push((
                     i,
                     event.level_idx,
@@ -3108,24 +3088,24 @@ mod tests {
     }
 
     #[test]
-    fn test_delete_with_stats_reports_level_and_rebuild() -> DliResult<()> {
+    fn test_delete_reports_level_and_rebuild() -> DliResult<()> {
         let mut index = small_two_bucket_index(RebuildStrategy::BasicRebuild)?;
         // ids 0..9 end up in level 0, ids 10..14 stay in the buffer
         for i in 0..15 {
             index.insert(small_record(i), i as u32)?;
         }
 
-        let missing = index.delete_with_stats(999)?;
+        let missing = index.delete(999)?;
         assert!(!missing.deleted);
         assert!(missing.rebuild.is_none());
 
-        let from_buffer = index.delete_with_stats(12)?;
+        let from_buffer = index.delete(12)?;
         assert!(from_buffer.deleted);
         assert_eq!(from_buffer.level, None);
         assert!(from_buffer.rebuild.is_none());
 
         // level 0 drops to 9 records, below its minimum of 10: the buffer is flushed into it
-        let from_level = index.delete_with_stats(3)?;
+        let from_level = index.delete(3)?;
         assert!(from_level.deleted);
         assert_eq!(from_level.level, Some(0));
         let rebuild = from_level.rebuild.expect("the delete should trigger a rebuild");
@@ -3141,7 +3121,7 @@ mod tests {
         for i in 0..15 {
             no_rebuild_index.insert(small_record(i), i as u32)?;
         }
-        let outcome = no_rebuild_index.delete_with_stats(3)?;
+        let outcome = no_rebuild_index.delete(3)?;
         assert!(outcome.deleted);
         assert!(outcome.rebuild.is_none());
         Ok(())

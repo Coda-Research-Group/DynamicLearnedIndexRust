@@ -82,7 +82,7 @@ n_candidates = 300
 search_strategy = "model"  # options: knn, model
 print("INITIAL SEARCH IN INDEX")
 for i in range(0, len(queries) - 1, 50):
-    res = index.search(
+    res, _ = index.search(
         queries[i], k, n_candidates=n_candidates, search_strategy=search_strategy
     )
     print(f'For query "{i}" index found: {res}')
@@ -114,13 +114,13 @@ print()
 
 # delete
 id_to_delete = 0
-deleted = index.delete(id_to_delete)
+deleted = index.delete(id_to_delete)["deleted"]
 assert deleted
 
 
 # delte non-existing id
 id_to_delete = len(queries)
-res = index.delete(id_to_delete)
+res = index.delete(id_to_delete)["deleted"]
 print(f"deleting non-existing id results in: {res}")
 print()
 
@@ -170,10 +170,10 @@ print()
 print("SEARCH IN LOADED INDEX")
 # skipping first query as it was previously deleted
 for i in range(50, len(queries) - 1, 50):
-    res = index.search(
+    res, _ = index.search(
         queries[i], k, n_candidates=n_candidates, search_strategy=search_strategy
     )
-    loaded_res = loaded_index.search(
+    loaded_res, _ = loaded_index.search(
         queries[i], k, n_candidates=n_candidates, search_strategy=search_strategy
     )
     assert (res == loaded_res).all()

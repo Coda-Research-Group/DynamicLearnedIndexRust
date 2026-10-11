@@ -196,55 +196,36 @@ class DynamicLearnedIndex:
         k: int,
         n_candidates: int = 100,
         search_strategy: str = "model",
-    ) -> List[int]:
-        """Search for k nearest neighbors."""
+    ) -> tuple[np.ndarray, Dict[str, Any]]:
+        """Search for k nearest neighbors.
+
+        Returns the ids and a dict describing the search: `bucket_selection_time`,
+        `bucket_ordering_time`, `scan_time` (seconds), `visited_buckets` and
+        `visited_records`.
+        """
         return self._index.search(
             query, k, n_candidates=n_candidates, search_strategy=search_strategy
         )
 
-    def search_with_stats(
-        self,
-        query: np.ndarray,
-        k: int,
-        n_candidates: int = 100,
-        search_strategy: str = "model",
-    ) -> tuple[np.ndarray, Dict[str, Any]]:
-        """Search for k nearest neighbors and report what the search did.
-
-        Returns the ids and a dict with `bucket_selection_time`, `bucket_ordering_time`,
-        `scan_time` (seconds), `visited_buckets` and `visited_records`.
-        """
-        return self._index.search_with_stats(
-            query, k, n_candidates=n_candidates, search_strategy=search_strategy
-        )
-
-    def insert(self, query: np.ndarray, id: int) -> None:
-        """Insert a vector with given id."""
-        self._index.insert(query, id)
-
-    def insert_with_stats(self, query: np.ndarray, id: int) -> Dict[str, Any] | None:
+    def insert(self, query: np.ndarray, id: int) -> Dict[str, Any] | None:
         """Insert a vector with given id.
 
         Returns a dict describing the compaction the insert triggered, or None if
         the buffer was not full yet.
         """
-        return self._index.insert_with_stats(query, id)
-
-    def delete_with_stats(self, id: int) -> Dict[str, Any]:
-        """Delete the vector with given id and report what the delete did.
-
-        The dict holds `deleted`, `level_idx` (None for the buffer), `lookup_time`,
-        `total_time` and `rebuild` (a dict, or None if nothing was rebuilt).
-        """
-        return self._index.delete_with_stats(id)
+        return self._index.insert(query, id)
 
     def insert_bulk(self, records: np.ndarray, ids: np.ndarray) -> None:
         """Insert multiple vectors with given ids."""
         self._index.insert_bulk(records, ids)
 
 
-    def delete(self, id: int):
-        """Delete the vector with given id."""
+    def delete(self, id: int) -> Dict[str, Any]:
+        """Delete the vector with given id.
+
+        Returns a dict with `deleted`, `level_idx` (None for the buffer), `lookup_time`,
+        `total_time` and `rebuild` (a dict, or None if nothing was rebuilt).
+        """
         return self._index.delete(id)
 
     def n_buckets(self) -> int:
