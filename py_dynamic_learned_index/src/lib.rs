@@ -477,6 +477,17 @@ fn log_init(target: &Bound<'_, PyAny>, level: &str) -> PyResult<()> {
     Ok(())
 }
 
+/// Sets the global log filter, e.g. "warn" around a parallel batch: every record that reaches a
+/// Python file-like target takes the GIL, so debug timing logs serialise search_many's threads.
+#[pyfunction]
+fn set_log_level(level: &str) -> PyResult<()> {
+    let filter = level.parse::<log::LevelFilter>().map_err(|_| {
+        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("unknown log level {level:?}"))
+    })?;
+    log::set_max_level(filter);
+    Ok(())
+}
+
 #[pyclass]
 struct _DynamicLearnedIndexBuilderF32 {
     builder: IndexBuilder<f32>,
@@ -640,5 +651,6 @@ fn _pydli(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<_DynamicLearnedIndexF32>()?;
     m.add_class::<_DynamicLearnedIndexBuilderF32>()?;
     m.add_function(wrap_pyfunction!(log_init, m)?)?;
+    m.add_function(wrap_pyfunction!(set_log_level, m)?)?;
     Ok(())
 }

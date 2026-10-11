@@ -8,6 +8,7 @@ if TYPE_CHECKING:
     import numpy as np
 
 log_init = _pydli.log_init
+set_log_level = _pydli.set_log_level
 
 class DynamicLearnedIndexBuilder:
     """Builder for creating Dynamic Learned Index instances with fluent configuration.
@@ -214,7 +215,7 @@ class DynamicLearnedIndex:
         if queries.ndim != 2:
             raise ValueError(f"search_many needs a 2-D (n, d) batch, got shape {queries.shape}")
         return self._index.search_many(
-            np.ascontiguousarray(queries),
+            queries,
             k,
             threads,
             n_candidates=n_candidates,
