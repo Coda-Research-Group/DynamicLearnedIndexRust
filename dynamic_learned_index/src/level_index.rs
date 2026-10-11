@@ -559,9 +559,15 @@ impl<F: FloatElement> LevelIndex<F> {
         let input_shape = self.model.input_shape;
         let mut assignments = Vec::with_capacity(records.len() / input_shape);
         for chunk in records.chunks(ASSIGN_CHUNK_ROWS * input_shape) {
-            for mut prediction in self.model.predict_many(chunk)? {
-                prediction.sort_by(|(_, a), (_, b)| b.total_cmp(a));
-                assignments.push(prediction[0].0);
+            for prediction in self.model.predict_many(chunk)? {
+                // First maximum under total_cmp, as the stable descending sort this replaced picked.
+                let mut best = prediction[0];
+                for &candidate in &prediction[1..] {
+                    if candidate.1.total_cmp(&best.1).is_gt() {
+                        best = candidate;
+                    }
+                }
+                assignments.push(best.0);
             }
         }
         Ok(assignments)
