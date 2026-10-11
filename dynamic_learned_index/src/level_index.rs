@@ -17,6 +17,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+const ASSIGN_CHUNK_ROWS: usize = 4096;
+
 #[derive(Debug)]
 pub(crate) struct HotStorage<F: FloatElement> {
     pub(crate) buckets: Vec<Bucket<F>>,
@@ -539,14 +541,7 @@ impl<F: FloatElement> LevelIndex<F> {
             return Ok(InsertTimings::default());
         }
         let ((model_evaluation, insert), total) = timed!({
-        let (assignments, model_evaluation) = timed!(self.model.predict_many(&records)?);
-        let assignments = assignments
-            .into_iter()
-            .map(|mut assignment| {
-                assignment.sort_by(|(_, a), (_, b)| b.total_cmp(a));
-                assignment[0].0
-            })
-            .collect::<Vec<_>>();
+        let (assignments, model_evaluation) = timed!(self.assign_buckets(&records)?);
         let (_, insert) = timed!(self.storage.insert(records, ids, &assignments)?);
         (model_evaluation, insert)
         });
@@ -555,6 +550,21 @@ impl<F: FloatElement> LevelIndex<F> {
             insert,
             total,
         })
+    }
+
+    /// Most probable bucket per record. `predict_many` returns a `(usize, f32)` per
+    /// bucket per record, so it is called per chunk: on all records at once, 10M rows
+    /// into 10,000 buckets would hold 1.6 TB.
+    pub(crate) fn assign_buckets(&self, records: &[F]) -> DliResult<Vec<usize>> {
+        let input_shape = self.model.input_shape;
+        let mut assignments = Vec::with_capacity(records.len() / input_shape);
+        for chunk in records.chunks(ASSIGN_CHUNK_ROWS * input_shape) {
+            for mut prediction in self.model.predict_many(chunk)? {
+                prediction.sort_by(|(_, a), (_, b)| b.total_cmp(a));
+                assignments.push(prediction[0].0);
+            }
+        }
+        Ok(assignments)
     }
 
     pub(crate) fn dump(&self, working_dir: &Path, level_id: usize) -> DliResult<DiskLevelIndex> {
@@ -1565,6 +1575,36 @@ mod tests {
         level.storage.delete(&3u32, &DeleteMethod::OidToBucket);
         assert_eq!(level.storage.occupied(), 0);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_assign_buckets_across_chunks_matches_per_record_argmax() -> DliResult<()> {
+        let input_shape = 3;
+        let level = LevelIndexBuilder::<f32>::default()
+            .n_buckets(16)
+            .input_shape(input_shape)
+            .bucket_size(10)
+            .model(ModelConfig::default())
+            .distance_fn(DistanceFn::Dot)
+            .build()?;
+        let n = 2 * ASSIGN_CHUNK_ROWS + 3;
+        let records: Vec<f32> = (0..n * input_shape)
+            .map(|i| ((i * 7919) % 1000) as f32 / 100.0 - 5.0)
+            .collect();
+
+        let assignments = level.assign_buckets(&records)?;
+
+        assert_eq!(assignments.len(), n);
+        for (row, assigned) in records.chunks(input_shape).zip(&assignments) {
+            let prediction = level.model.predict_many(row)?.remove(0);
+            let best = prediction
+                .iter()
+                .max_by(|(ia, a), (ib, b)| a.total_cmp(b).then(ib.cmp(ia)))
+                .unwrap()
+                .0;
+            assert_eq!(*assigned, best);
+        }
         Ok(())
     }
 }
