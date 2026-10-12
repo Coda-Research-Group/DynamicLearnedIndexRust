@@ -616,6 +616,11 @@ impl<F: FloatElement + VectorType> CompactionStrategy<F> {
             CompactionStrategyConfig::BentleySaxe(RebuildStrategy::GreedyRebuild) => {
                 debug!("index:greedy_rebuild");
                 match Self::find_source_target_levels(index, level_idx, level_occupied) {
+                    // Last resort of `find_source_target_levels`: the under-utilized level moves one level up,
+                    // into the empty level above it; there is nothing to gather.
+                    Some((from_level_idx, to_level_idx)) if from_level_idx > to_level_idx => {
+                        move_data(index, &[from_level_idx], to_level_idx)?;
+                    }
                     Some((_, to_level_idx)) => {
                         let mut available_space = index.levels[to_level_idx].storage.free_space();
                         let mut source_levels = vec![];
@@ -3065,6 +3070,45 @@ mod tests {
             before, after,
             "no_retrain must keep the model of a refilled level"
         );
+        Ok(())
+    }
+
+    fn small_two_bucket_index(rebuild_strategy: RebuildStrategy) -> DliResult<Index<f32>> {
+        let mut config = create_test_config();
+        config.arity = 2;
+        config.levels.bucket_size = 10;
+        config.buffer_size = 10;
+        config.compaction_strategy = CompactionStrategyConfig::BentleySaxe(rebuild_strategy);
+        IndexBuilder::from_config(config).build()
+    }
+
+    fn small_record(i: usize) -> Vec<f32> {
+        vec![(i % 7 + 1) as f32, (i % 5 + 1) as f32, (i % 3 + 1) as f32]
+    }
+
+    // Ported from the Rust repo's 26e6f18 to this branch's delete API, which returns only whether the id was found.
+    #[test]
+    fn test_greedy_rebuild_moves_underutilized_level_up() -> DliResult<()> {
+        let mut index = small_two_bucket_index(RebuildStrategy::GreedyRebuild)?;
+        // after 30 inserts level 0 is empty and level 1 holds all 30 records
+        for i in 0..30 {
+            index.insert(small_record(i), i as u32)?;
+        }
+        assert_eq!(index.level_occupied(0), 0);
+        assert_eq!(index.level_occupied(1), 30);
+
+        // level 1 needs at least 20 records; the first 10 deletes do not trigger a rebuild
+        for id in 0..10 {
+            assert!(index.delete(id)?);
+        }
+        assert_eq!(index.level_occupied(1), 20);
+
+        // the 11th delete leaves 19: no deeper level exists and no shallower level holds data,
+        // so level 1 itself moves up into the empty level 0
+        assert!(index.delete(10)?);
+        assert_eq!(index.level_occupied(0), 19);
+        assert_eq!(index.level_occupied(1), 0);
+        assert_eq!(index.occupied(), 19);
         Ok(())
     }
 }
